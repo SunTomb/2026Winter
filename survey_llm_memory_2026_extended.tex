@@ -1,0 +1,961 @@
+%% ============================================================
+%%  Survey: Memory Mechanisms and Autonomous Learning in LLMs
+%%  Author: [Author Name]
+%%  Date: March 2026
+%% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+%%--- Packages ---
+%% 移除原有的 fontenc 和 inputenc，替换为 ctex 宏包以支持 XeLaTeX 下的中文编译
+\usepackage[UTF8]{ctex} 
+
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{natbib}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+
+%%--- Custom Colors ---
+\definecolor{codeblue}{RGB}{0,90,180}
+\definecolor{codegray}{RGB}{128,128,128}
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{highlight}{RGB}{255,246,220}
+\definecolor{boxframe}{RGB}{200,170,80}
+
+%%--- Code Listing Style ---
+\lstdefinestyle{pythonstyle}{
+  backgroundcolor=\color{codebg},
+  commentstyle=\color{codegray}\itshape,
+  keywordstyle=\color{codeblue}\bfseries,
+  stringstyle=\color{red!60!black},
+  basicstyle=\ttfamily\footnotesize,
+  breakatwhitespace=false,
+  breaklines=true,
+  keepspaces=true,
+  numbers=left,
+  numberstyle=\tiny\color{codegray},
+  showspaces=false,
+  showstringspaces=false,
+  showtabs=false,
+  tabsize=2,
+  language=Python,
+  frame=single,
+  rulecolor=\color{gray!40}
+}
+
+%%--- Custom Box ---
+\newtcolorbox{insightbox}[1][]{
+  enhanced,
+  breakable,
+  colback=highlight,
+  colframe=boxframe,
+  title=#1,
+  fonttitle=\bfseries,
+  boxrule=1pt,
+  arc=3pt
+}
+
+%%--- Title ---
+\title{
+  \vspace{-1cm}
+  \LARGE\bfseries 大语言模型记忆机制与自主学习前沿调研报告\\[0.5em]
+  \large Survey on Memory Mechanisms and Autonomous Learning\\
+  in Large Language Models (2023--2026)
+}
+\author{调研执行：AI 算法研究助理\\[0.3em]
+  \small 工作区：\texttt{2026Winter} $\cdot$ 日期：2026年3月}
+\date{}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+本报告系统调研了大语言模型（LLM）记忆机制与自主学习领域2023至2026年间的核心文献，
+涵盖工作区已有论文（共8篇）及本次新检索下载的5篇高价值前沿论文（已存入
+\texttt{2026Winter/More}目录）。报告从记忆的形成、检索、更新与整合四个维度对各方法进行
+横向对比，揭示当前主流范式的核心创新与固有局限，并针对最优两篇工作——\textbf{Memory-R1}
+与\textbf{Self-Consolidation}——给出具体的代码复现路线与实验框架建议，以期为后续研究提供
+参考。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% ===========================================================
+\section{研究背景与动机}
+%% ===========================================================
+
+大语言模型在推理、生成和工具调用方面展现出强大能力，但其本质上是\textbf{无状态}
+（stateless）的系统：每次推理均从空白上下文出发，无法跨对话保留经验。随着应用场景扩展
+至长期对话、个性化助手、多任务代理等领域，\textbf{持久记忆}（persistent memory）与
+\textbf{自主学习}（autonomous learning）能力正成为制约 LLM 实际部署的核心瓶颈。
+
+\subsection{记忆的多维度定义}
+
+受认知科学启发，LLM 记忆研究通常借鉴人类记忆的分类体系：
+
+\begin{itemize}
+  \item \textbf{情景记忆}（Episodic Memory）：对话历史、事件序列；
+  \item \textbf{语义记忆}（Semantic Memory）：提炼的知识与偏好；
+  \item \textbf{程序记忆}（Procedural Memory）：内化于模型参数中的技能。
+\end{itemize}
+
+\subsection{核心挑战}
+
+\begin{enumerate}
+  \item \textbf{上下文窗口限制}：即便最大型模型也无法在推理时容纳无限历史；
+  \item \textbf{记忆遗忘与更新}：随时间推移，旧记忆应被精化或淘汰，而非单纯堆积；
+  \item \textbf{检索效率}：从大规模外部记忆库中快速定位相关片段；
+  \item \textbf{噪声与冗余}：朴素的累积策略会引入噪声，降低记忆质量；
+  \item \textbf{参数化整合}：如何将外部经验真正"内化"至模型权重。
+\end{enumerate}
+
+%% ===========================================================
+\section{调研论文全景}
+%% ===========================================================
+
+\subsection{已有文献（工作区原有）}
+
+\begin{table}[h!]
+\centering
+\caption{工作区已有论文概览}
+\label{tab:existing}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{llllp{5.5cm}}
+\toprule
+\textbf{论文简称} & \textbf{年份} & \textbf{存放位置} & \textbf{链接} & \textbf{核心贡献} \\
+\midrule
+Generative Agents & 2023 & TTL & \href{https://arxiv.org/abs/2304.03442}{ArXiv} & 模拟人类行为的 Agent，
+  引入记忆流（memory stream）、记忆检索与反思机制 \\
+Reflexion & 2023 & TTL & \href{https://arxiv.org/abs/2303.11366}{ArXiv} & 语言强化学习，通过语言形式的自我反思作为记忆信号 \\
+MemGPT & 2023 & Self-evolving & \href{https://arxiv.org/abs/2310.08560}{ArXiv} & 仿 OS 分层记忆管理，主内存+外部存储+分页机制 \\
+MemoryBank & 2023 & Self-evolving & \href{https://arxiv.org/abs/2305.10250}{ArXiv} & 记忆银行框架，Ebbinghaus 遗忘曲线启发的记忆更新 \\
+RAG & 2020 & Self-evolving & \href{https://arxiv.org/abs/2005.11401}{ArXiv} & 检索增强生成，将外部知识库实时注入上下文 \\
+Self-RAG & 2023 & Self-evolving & \href{https://arxiv.org/abs/2310.11511}{ArXiv} & 自我批评的检索增强，引入 Critique Token 控制检索时机 \\
+Evo-Memory & 2025 & 根目录 & \href{https://arxiv.org/abs/2511.20857}{ArXiv} & 测试时自演化记忆基准，提出 ReMem 流水线 \\
+Conditional Memory & 2026 & 根目录 & \href{https://github.com/deepseek-ai/Engram}{GitHub} & 条件稀疏记忆，KV Cache 新维度的结构化稀疏 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{新下载文献（存入 \texttt{More/} 目录）}
+
+\begin{table}[h!]
+\centering
+\caption{新检索高价值论文概览}
+\label{tab:new}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lllll}
+\toprule
+\textbf{文件名} & \textbf{ArXiv ID} & \textbf{年份} & \textbf{链接} & \textbf{核心方向} \\
+\midrule
+2025-Xu-A-Mem.pdf & 2502.12110 & 2025 & \href{https://arxiv.org/abs/2502.12110}{ArXiv} & Zettelkasten 启发的主动记忆组织 \\
+2025-Chhikara-Mem0.pdf & 2504.19413 & 2025 & \href{https://arxiv.org/abs/2504.19413}{ArXiv} & 生产级可扩展长期记忆 \\
+2025-Chen-Memory-R1.pdf & 2508.19828 & 2025 & \href{https://arxiv.org/abs/2508.19828}{ArXiv} & RL 驱动的记忆主动管理 \\
+2025-Wang-PAMU.pdf & 2510.09720 & 2025 & \href{https://arxiv.org/abs/2510.09720}{ArXiv} & 偏好感知的记忆动态更新 \\
+2026-Zhang-Self-Consolidation.pdf & 2602.01966 & 2026 & \href{https://arxiv.org/abs/2602.01966}{ArXiv} & 文本经验到参数的自我整合 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ===========================================================
+\section{各论文核心创新点详解}
+%% ===========================================================
+
+\subsection{Generative Agents}
+
+Park 等人构建了一个包含25个 Agent 的沙盒世界模拟，首次在 LLM Agent 中引入完整的
+\textbf{记忆流}（Memory Stream）。其记忆机制由三部分构成：
+\begin{itemize}
+  \item \textbf{记忆存储}：时间戳+事件描述的扁平序列；
+  \item \textbf{记忆检索}：综合近因（recency）、重要性（importance）和相关性（relevance）的加权评分；
+  \item \textbf{记忆反思}（Reflection）：定期将低层记忆归纳为高层洞见。
+\end{itemize}
+
+该工作开创性地将\emph{反思}（reflection）作为记忆压缩手段，但缺乏参数化更新，记忆仅
+以文本形式外存。
+
+\subsection{Reflexion}
+
+Reflexion 将错误经验转化为\textbf{语言形式的自我反思文本}，存入专属的 Episodic Memory
+Buffer，在后续任务中作为 few-shot 示例提供给模型。其本质是一种\textbf{语言强化学习}
+（verbal reinforcement learning），极大降低了梯度更新的依赖。局限在于记忆只保存成功轨迹
+的反思摘要，缺乏对失败模式的系统性总结与利用。
+
+\subsection{MemGPT}
+
+MemGPT 将操作系统的\textbf{分页内存管理}理念迁移到 LLM：上下文窗口视为"主内存"，
+外部数据库视为"磁盘"；模型通过特殊函数调用（\texttt{memory.append}、
+\texttt{memory.search}）主动控制信息的"换入换出"。这是首个将 LLM 自身作为内存
+控制器（memory controller）的工作，但内存操作仍依赖人工设计的函数接口，缺乏学习性。
+
+\subsection{MemoryBank}
+
+MemoryBank 受 Ebbinghaus 遗忘曲线启发，为每条记忆引入\textbf{衰减函数}：
+$$
+\text{retention}(t) = e^{-\frac{t}{\tau}}
+$$
+近期交互的记忆保留率高，遥远记忆自然衰减。更新时通过 LLM 对旧记忆摘要进行改写整合。
+虽然模拟了遗忘机制，但参数 $\tau$ 固定，无法自适应不同用户行为节律。
+
+\subsection{RAG \& Self-RAG}
+
+RAG 通过稠密检索将外部知识实时注入上下文，解决了参数知识滞后问题，但对话历史管理
+的颗粒度较粗。Self-RAG 引入 Critique Token（\texttt{[Retrieve]}、\texttt{[IsRel]}、
+\texttt{[IsSup]}）让模型自主决策是否检索及检索结果质量，显著提升效率；然而其记忆系统
+本质仍是静态语料库，不支持在线更新。
+
+\subsection{Evo-Memory}
+
+Evo-Memory 提出\textbf{测试时演化记忆}（test-time evolving memory）基准，评估 Agent
+在顺序任务流中持续检索、整合和更新记忆的能力。配套提出的 \textbf{ReMem} 框架（Action
+$\to$ Think $\to$ Memory Refine 流水线）以迭代记忆精化取代朴素累积，是首个针对记忆演化
+质量设计专项基准的工作。其不足在于记忆仍以文本形式外存，参数化能力有限。
+
+\subsection{Conditional Memory}
+
+Conditional Memory 从\textbf{模型结构}视角切入，将 KV Cache 的稀疏化从"位置维度"
+扩展到"内容条件维度"，在大规模 LLM 推理中动态路由相关 KV 对。这本质上是一种
+\emph{参数内记忆}（in-weights / in-cache memory）的高效压缩方案，与外部记忆研究形成
+互补，但不直接解决跨会话的长期记忆问题。
+
+\subsection{A-MEM}
+
+A-MEM 将卡片笔记法（\textbf{Zettelkasten}）引入 LLM 记忆：每条新记忆被构建为
+一张"知识卡片"，包含上下文描述、关键词、标签及指向历史记忆的显式链接；当新记忆
+加入时，相关旧记忆的属性也被\emph{主动更新}（memory evolution）。与 RAG 的被动检索
+相比，A-MEM 实现了\textbf{主动记忆组织}（agentic memory organization），在六个基础
+模型上均超越 SOTA 基线，并公开了代码。
+
+\subsection{Mem0}
+
+Mem0 面向\textbf{生产部署}需求，构建了可扩展的记忆中心架构：LLM 动态提取并
+整合对话中的关键信息，图结构记忆模块进一步捕捉对话元素间的关系网络。在 LOCOMO
+基准上，Mem0 相比全上下文方法将 p95 延迟降低 \textbf{91\%}、token 成本节省超
+\textbf{90\%}，同时在 LLM-as-a-Judge 指标上超越 OpenAI 26\%。其核心贡献是
+\textbf{工程效率}与\textbf{准确性的同步提升}。
+
+\subsection{Memory-R1}
+
+Memory-R1 用\textbf{强化学习}（RL）替代启发式规则来驱动记忆管理，包含两个专用
+Agent：
+\begin{itemize}
+  \item \textbf{Memory Manager}：通过 PPO/GRPO 学习 ADD、UPDATE、DELETE、NOOP 四种
+    操作策略；
+  \item \textbf{Answer Agent}：预选相关记忆条目并推理作答。
+\end{itemize}
+关键特性：\textbf{仅需 152 条训练 QA 对}即可在 LoCoMo、MSC、LongMemEval 三个基准
+上超越强基线，且泛化至 3B--14B 多种模型规模，是目前记忆管理中\textbf{数据效率最高}
+的方案之一。
+
+\subsection{PAMU}
+
+PAMU 专注于\textbf{记忆更新}这一被忽视的环节，提出用滑动窗口均值（SW）与指数移动
+均值（EMA）的融合来构建偏好感知表示：
+$$
+\text{PAMU}(t) = \alpha \cdot \overline{m}_{\text{SW}}(t) + (1-\alpha) \cdot \overline{m}_{\text{EMA}}(t)
+$$
+SW 捕捉短期行为波动，EMA 保留长期用户偏好，两者互补。在 LoCoMo 数据集的五个任务
+场景中，PAMU 可无缝插入5种基线系统并带来一致提升，体现了良好的\textbf{模块化设计}。
+
+\subsection{Self-Consolidation}
+
+Self-Consolidation 是迄今最前沿的自演化 Agent 工作（2026年2月），提出双轨演化机制：
+\begin{enumerate}
+  \item \textbf{对比反思}（Contrastive Reflection）：对比成功与失败轨迹，显式归纳
+    易错模式，而非仅存储成功案例；
+  \item \textbf{自我整合}（Self-Consolidation）：将文本形式的历史经验通过低秩微调
+    （LoRA）蒸馏进模型参数，避免外部记忆库随时间膨胀的问题。
+\end{enumerate}
+这是首个将\textbf{参数化学习}与\textbf{外部记忆检索}统一到单一自演化框架的工作，
+从根本上突破了"记忆只能在上下文中，不能改变模型本身"的范式边界。
+
+%% ===========================================================
+\section{记忆更新机制横向对比}
+%% ===========================================================
+
+\begin{table}[h!]
+\centering
+\caption{各方法记忆更新机制对比}
+\label{tab:compare}
+\renewcommand{\arraystretch}{1.4}
+\small
+\begin{tabular}{p{3.2cm}cccccc}
+\toprule
+\textbf{方法} &
+\textbf{外部存储} &
+\textbf{参数更新} &
+\textbf{主动更新} &
+\textbf{遗忘/衰减} &
+\textbf{失败反思} &
+\textbf{在线学习} \\
+\midrule
+Generative Agents & \checkmark & $\times$ & 半自动 & $\times$ & $\times$ & $\times$ \\
+Reflexion          & \checkmark & $\times$ & 手动触发 & $\times$ & 部分 & $\times$ \\
+MemGPT             & \checkmark & $\times$ & 函数调用 & $\times$ & $\times$ & $\times$ \\
+MemoryBank         & \checkmark & $\times$ & 改写整合 & Ebbinghaus & $\times$ & $\times$ \\
+RAG                & \checkmark & $\times$ & $\times$ & $\times$ & $\times$ & $\times$ \\
+Self-RAG           & \checkmark & $\times$ & 自主决策 & $\times$ & $\times$ & $\times$ \\
+Evo-Memory         & \checkmark & $\times$ & 迭代精化 & $\times$ & $\times$ & 测试时 \\
+A-MEM               & \checkmark & $\times$ & 主动演化 & $\times$ & $\times$ & 测试时 \\
+Mem0               & \checkmark & $\times$ & 自动提取 & 隐式 & $\times$ & \checkmark \\
+PAMU               & \checkmark & $\times$ & SW+EMA & 加权衰减 & $\times$ & \checkmark \\
+Memory-R1          & \checkmark & $\times$ & RL 学习 & RL 策略 & $\times$ & \checkmark \\
+Self-Consolidation & \checkmark & \textbf{\checkmark} & RL+对比 & LoRA 蒸馏 & \checkmark & \checkmark \\
+Conditional Memory & $\times$ & \checkmark & KV 稀疏 & 动态路由 & $\times$ & $\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{维度深析}
+
+\paragraph{记忆形成（Formation）}
+从 Generative Agents 的"事件日志堆积"到 A-MEM 的"结构化知识卡片"，再到
+Self-Consolidation 的"参数蒸馏"，记忆形成经历了从\emph{被动记录}→\emph{主动组织}
+→\emph{内化参数}的三代演进。
+
+\paragraph{记忆检索（Retrieval）}
+RAG 族方法基于稠密相似度；MemGPT 依赖显式函数签名；Memory-R1 的 Answer Agent
+通过 RL 学得"何时检索、检索什么"的策略，是首个将检索本身视为\emph{可学习决策}的工作。
+
+\paragraph{记忆更新（Update）}
+PAMU 揭示现有方法在更新阶段的普遍疏忽，SW+EMA 融合是一种\textbf{低成本插件式}
+解决方案。Memory-R1 的 RL 框架则端到端学习更新策略，但训练成本更高。
+
+\paragraph{记忆整合（Consolidation）}
+只有 Self-Consolidation 真正实现了文本记忆→模型参数的整合，突破了外部记忆随时间
+无限膨胀的瓶颈。这与神经科学中"系统性记忆巩固"（system consolidation）高度吻合。
+
+%% ===========================================================
+\section{现有方法的局限性}
+%% ===========================================================
+
+\begin{enumerate}
+  \item \textbf{记忆更新被低估}：绝大多数工作将研究重心放在检索上，而忽视旧记忆的
+    动态精化。当用户偏好随时间发生漂移时，静态记忆会导致推荐/回复质量明显下滑。
+    PAMU 仅部分解决此问题，仍缺乏对\emph{语义级}记忆冲突的检测和消解机制。
+
+  \item \textbf{失败经验利用不足}：Reflexion 等方法仅保存成功轨迹的反思，忽略失败
+    模式的教学价值。Self-Consolidation 是首个系统性挖掘失败案例的工作，表明负样本
+    对长期演化至关重要。
+
+  \item \textbf{参数化整合缺失}：外部记忆库本质上是"追加型数据库"，随时间增长必然
+    带来检索延迟上升和噪声累积。只有 Self-Consolidation 迈出了参数整合的第一步，
+    但其 LoRA 微调频率与触发时机的设计仍较启发式，缺乏理论依据。
+
+  \item \textbf{评估基准不统一}：不同方法在 LoCoMo、MSC、LongMemEval 等数据集上
+    各自报告，交叉对比困难。Evo-Memory 基准是一次有益尝试，但覆盖范围有限。
+
+  \item \textbf{多 Agent 场景稀缺}：现有方法几乎全部聚焦单 Agent，共享记忆池、
+    记忆所有权、一致性等多 Agent 问题几乎无人涉及。
+
+  \item \textbf{隐私与安全}：持久外部记忆本质上存储了用户敏感交互，记忆的权限管理、
+    差分隐私保护、记忆"遗忘权"等议题亟待研究。
+\end{enumerate}
+
+%% ===========================================================
+\section{顶级论文代码复现思路}
+%% ===========================================================
+
+\subsection{Memory-R1：基于强化学习的记忆管理}
+
+\subsubsection{核心架构设计}
+
+Memory-R1 包含两个 RL 微调的 Agent，建议采用如下实验框架：
+
+\begin{lstlisting}[style=pythonstyle, caption={Memory-R1 核心组件伪代码}]
+# ============================================================
+# Memory-R1 Reproduction Framework
+# 推荐环境: Python 3.10+, PyTorch 2.x, transformers, trl
+# ============================================================
+
+from dataclasses import dataclass, field
+from typing import Literal
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import PPOTrainer, PPOConfig
+
+MemoryOp = Literal["ADD", "UPDATE", "DELETE", "NOOP"]
+
+@dataclass
+class MemoryEntry:
+    """外部记忆库条目"""
+    content: str
+    timestamp: float
+    relevance_score: float = 0.0
+
+class MemoryStore:
+    """外部记忆数据库（可替换为 FAISS / ChromaDB）"""
+    def __init__(self, max_entries: int = 500):
+        self.entries: list[MemoryEntry] = []
+        self.max_entries = max_entries
+
+    def add(self, content: str, timestamp: float):
+        self.entries.append(MemoryEntry(content=content, timestamp=timestamp))
+        if len(self.entries) > self.max_entries:
+            self.entries.pop(0)  # FIFO truncation
+
+    def retrieve(self, query: str, topk: int = 5) -> list[MemoryEntry]:
+        # 建议替换为 Dense Retrieval (DPR / BM25)
+        return sorted(self.entries, key=lambda e: e.relevance_score,
+                      reverse=True)[:topk]
+
+class MemoryManager:
+    """Memory Manager Agent - PPO/GRPO 微调目标"""
+    def __init__(self, model_name: str, store: MemoryStore):
+        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.store = store
+
+    def predict_operation(self, new_event: str,
+                          history: list[MemoryEntry]
+                          ) -> tuple[MemoryOp, str]:
+        """输出操作类型 + 操作目标内容"""
+        prompt = self._build_manager_prompt(new_event, history)
+        output = self._generate(prompt)
+        op, content = self._parse_output(output)
+        return op, content
+
+    def _build_manager_prompt(self, event: str,
+                              history: list[MemoryEntry]) -> str:
+        memory_str = "\n".join(
+            [f"[{i}] {e.content}" for i, e in enumerate(history)])
+        return (
+            f"Current memory entries:\n{memory_str}\n\n"
+            f"New event: {event}\n\n"
+            f"Decide: ADD / UPDATE [index] / DELETE [index] / NOOP\n"
+            f"Operation:"
+        )
+
+class AnswerAgent:
+    """Answer Agent - 选择相关记忆并作答"""
+    def __init__(self, model_name: str, store: MemoryStore):
+        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.store = store
+
+    def answer(self, question: str) -> str:
+        relevant = self.store.retrieve(question, topk=5)
+        prompt = self._build_answer_prompt(question, relevant)
+        return self._generate(prompt)
+
+# RL 训练配置
+def train_memory_r1(manager: MemoryManager, data: list[dict]):
+    """
+    data 格式: [{"events": [...], "question": str, "answer": str}, ...]
+    奖励函数: 最终答案 F1/Exact Match
+    """
+    config = PPOConfig(
+        model_name=manager.model.name_or_path,
+        learning_rate=1.41e-5,
+        batch_size=16,
+        mini_batch_size=4,
+        gradient_accumulation_steps=2,
+        ppo_epochs=4,
+    )
+    # outcome-driven reward: 仅基于最终 QA 准确率
+    def reward_fn(completions, answers):
+        return [1.0 if c.strip() == a.strip() else 0.0
+                for c, a in zip(completions, answers)]
+    # ... PPO training loop
+\end{lstlisting}
+
+\subsubsection{实验框架与建议}
+
+\begin{insightbox}[Memory-R1 复现实验框架]
+\textbf{数据集}：LoCoMo（首选）、MSC、LongMemEval \\
+\textbf{基础模型}：Qwen2.5-3B-Instruct（快速验证）→ Qwen2.5-7B/14B（正式实验） \\
+\textbf{训练规模}：仅需 $\sim$152 QA 对，建议设置消融实验：50/100/152/300 \\
+\textbf{检索模块}：初步用 BM25，进阶替换 DPR + FAISS 向量库 \\
+\textbf{评估指标}：F1, Exact Match, LLM-as-a-Judge（GPT-4o 评分） \\
+\textbf{对比基线}：MemGPT, MemoryBank, Mem0, A-MEM \\
+\textbf{关键消融}：(1) 仅 ADD 操作；(2) 无 RL，用贪婪策略；(3) 无 Answer Agent
+\end{insightbox}
+
+\begin{lstlisting}[style=pythonstyle, caption={完整实验运行脚本骨架}]
+# run_memoryr1_exp.py
+import argparse
+from datasets import load_dataset
+
+def main(args):
+    # 1. 加载数据
+    dataset = load_dataset("locomo_bench")  # 替换为实际路径
+
+    # 2. 初始化组件
+    store = MemoryStore(max_entries=args.max_memory)
+    manager = MemoryManager(args.model_name, store)
+    agent = AnswerAgent(args.model_name, store)
+
+    # 3. Phase 1: SFT 热启动 (可选，提升训练稳定性)
+    # sft_train(manager, agent, dataset["train"], epochs=1)
+
+    # 4. Phase 2: RL 微调
+    train_memory_r1(manager, dataset["train"])
+
+    # 5. 评估
+    results = evaluate(agent, dataset["test"])
+    print(f"F1: {results['f1']:.4f} | EM: {results['em']:.4f}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", default="Qwen/Qwen2.5-7B-Instruct")
+    parser.add_argument("--max_memory", type=int, default=200)
+    args = parser.parse_args()
+    main(args)
+\end{lstlisting}
+
+\subsection{Self-Consolidation：文本经验的参数内化}
+
+\subsubsection{核心架构设计}
+
+Self-Consolidation 的关键在于"对比反思"与"LoRA 蒸馏"的协同，复现重点在于正确
+构建对比对（contrastive pair）和设计合理的 LoRA 触发策略。
+
+\begin{lstlisting}[style=pythonstyle, caption={Self-Consolidation 核心框架}]
+# ============================================================
+# Self-Consolidation Reproduction Framework
+# 依赖: peft (LoRA), transformers, torch
+# ============================================================
+
+from peft import LoraConfig, get_peft_model, TaskType
+import torch.nn.functional as F
+
+@dataclass
+class Trajectory:
+    """单次任务执行轨迹"""
+    steps: list[str]          # 行动序列
+    success: bool             # 是否成功
+    final_response: str       # 最终输出
+
+class ContrastiveReflector:
+    """
+    对比反思模块：对比成功/失败轨迹，提炼错误模式与可复用洞见
+    """
+    def __init__(self, llm_model, tokenizer):
+        self.model = llm_model
+        self.tokenizer = tokenizer
+
+    def reflect(self,
+                success_traj: Trajectory,
+                failure_traj: Trajectory) -> str:
+        """
+        输入：一对成功/失败轨迹
+        输出：自然语言反思摘要（含错误模式 + 改进策略）
+        """
+        prompt = self._build_contrast_prompt(success_traj, failure_traj)
+        reflection = self._generate(prompt, max_new_tokens=256)
+        return reflection
+
+    def _build_contrast_prompt(self, s: Trajectory, f: Trajectory) -> str:
+        return (
+            "Compare the following two task trajectories:\n\n"
+            f"[SUCCESS]\n{chr(10).join(s.steps)}\n\n"
+            f"[FAILURE]\n{chr(10).join(f.steps)}\n\n"
+            "Identify:\n"
+            "1. Key error patterns in the failure trajectory\n"
+            "2. Reusable strategies from the successful trajectory\n"
+            "3. Concrete advice to avoid future failures\n\n"
+            "Reflection:"
+        )
+
+class SelfConsolidator:
+    """
+    自我整合模块：将积累的文本反思蒸馏为 LoRA 参数增量
+    触发条件建议：每积累 N=50 条反思，或任务成功率连续下降3轮
+    """
+    def __init__(self, base_model, tokenizer, lora_rank: int = 16):
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=lora_rank,
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj"],  # 可调整目标层
+            lora_dropout=0.05,
+            bias="none",
+        )
+        self.model = get_peft_model(base_model, lora_config)
+        self.tokenizer = tokenizer
+        self.reflection_buffer: list[str] = []  # 文本记忆缓冲区
+
+    def accumulate(self, reflection: str):
+        """将反思文本加入缓冲区"""
+        self.reflection_buffer.append(reflection)
+
+    def consolidate(self, trigger_threshold: int = 50):
+        """
+        当缓冲区满足阈值时执行参数蒸馏
+        采用 SFT Loss 在反思文本上微调 LoRA 层
+        """
+        if len(self.reflection_buffer) < trigger_threshold:
+            return  # 未达到触发条件
+
+        # 构建蒸馏数据集
+        texts = self.reflection_buffer.copy()
+        self.reflection_buffer.clear()
+
+        self.model.train()
+        optimizer = torch.optim.AdamW(
+            self.model.parameters(), lr=1e-4, weight_decay=0.01)
+
+        for text in texts:
+            inputs = self.tokenizer(
+                text, return_tensors="pt", truncation=True,
+                max_length=512).to(self.model.device)
+            outputs = self.model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        print(f"[SelfConsolidation] Consolidated {len(texts)} reflections"
+              f" into LoRA parameters.")
+
+class SelfEvolvingAgent:
+    """
+    集成 ContrastiveReflector + SelfConsolidator 的完整自演化 Agent
+    """
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.reflector = ContrastiveReflector(model, tokenizer)
+        self.consolidator = SelfConsolidator(model, tokenizer)
+        self.trajectory_history: list[Trajectory] = []
+
+    def execute_task(self, task: str) -> Trajectory:
+        """执行任务并记录轨迹（由子类实现具体逻辑）"""
+        raise NotImplementedError
+
+    def evolve(self):
+        """每完成一批任务后触发演化流程"""
+        successes = [t for t in self.trajectory_history if t.success]
+        failures = [t for t in self.trajectory_history if not t.success]
+
+        # 对比反思（要求至少各有一条）
+        for s, f in zip(successes, failures):
+            reflection = self.reflector.reflect(s, f)
+            self.consolidator.accumulate(reflection)
+
+        # 尝试参数整合
+        self.consolidator.consolidate()
+        self.trajectory_history.clear()
+\end{lstlisting}
+
+\subsubsection{实验框架与建议}
+
+\begin{insightbox}[Self-Consolidation 复现实验框架]
+\textbf{数据集}：WebArena / ALFWorld（Agent 任务）+ LoCoMo（对话记忆任务） \\
+\textbf{基础模型}：LLaMA-3.1-8B-Instruct 或 Qwen2.5-7B-Instruct \\
+\textbf{LoRA 配置}：rank=16, alpha=32, target=\texttt{q\_proj, v\_proj} \\
+\textbf{触发策略}：实验三种阈值——每 20/50/100 条反思触发一次整合 \\
+\textbf{评估重点}：长期演化曲线（任务成功率 vs. 轮次），非单次测试表现 \\
+\textbf{关键消融}：\\
+  \quad (1) 仅对比反思，不做参数整合（验证整合的必要性）\\
+  \quad (2) 仅保存成功轨迹（复现 Reflexion 基线，验证对比的价值）\\
+  \quad (3) 全模型微调 vs. LoRA（效率与效果权衡）\\
+\textbf{可视化}：记忆库大小随时间变化曲线；LoRA 参数范数的演化图
+\end{insightbox}
+
+%% ===========================================================
+\section{研究展望}
+%% ===========================================================
+
+基于上述分析，我们建议以下几个有价值的未来研究方向：
+
+\begin{enumerate}
+  \item \textbf{记忆更新的理论框架}：将 PAMU 的 SW+EMA 融合推广至基于贝叶斯
+    更新的记忆精化，为"何时遗忘、何时保留"提供理论依据。
+
+  \item \textbf{联合训练}：Memory-R1 的 Memory Manager 与 Self-Consolidation 的
+    对比反思可以端到端联合优化，探索 RL + LoRA 协同训练的可行性。
+
+  \item \textbf{多 Agent 共享记忆}：将 Mem0 的图结构记忆扩展到多 Agent 协作场景，
+    研究记忆所有权、一致性与冲突消解。
+
+  \item \textbf{记忆可解释性}：对比 A-MEM 的显式链接网络与 Self-Consolidation 的
+    隐式参数整合，探索可解释性与能力之间的权衡。
+
+  \item \textbf{安全记忆}：引入差分隐私（DP-SGD）对记忆蒸馏过程进行保护，研究
+    "记忆遗忘"（memory unlearning）在医疗、法律等高隐私场景的应用。
+\end{enumerate}
+
+
+%% ===========================================================
+\section{继续调研：Memory + 自主学习前沿补充（2024--2026）}
+%% ===========================================================
+
+基于前文已有综述，下一阶段最值得补强的并不是继续罗列“可存储记忆的方法”，而是把
+\textbf{记忆载体}、\textbf{自主学习策略}与\textbf{参数巩固机制}三条线真正打通。
+近两年的前沿工作显示，LLM 记忆研究正从“把历史塞进向量库”转向“如何让 Agent
+主动组织、选择、压缩、迁移并内化经验”。这一变化意味着研究重点已从静态检索
+系统，转向具备\emph{生命周期管理}能力的演化式记忆系统。
+
+\subsection{应新增纳入的高价值前沿论文}
+
+\begin{table}[h!]
+\centering
+\caption{建议新增纳入的前沿论文（优先级版）}
+\renewcommand{\arraystretch}{1.25}
+\small
+\begin{tabular}{p{3.2cm}p{1.1cm}p{4.3cm}p{5.8cm}}
+\toprule
+\textbf{论文} & \textbf{年份} & \textbf{核心技术} & \textbf{纳入理由} \\
+\midrule
+HippoRAG & 2024 & KG + Personalized PageRank 的海马体启发检索 & 不是简单 RAG，而是把“长期记忆索引”建成结构化图记忆，是从检索走向记忆组织的关键过渡。 \\
+LongMemEval & 2024/2025 & 长期交互记忆基准 & 明确把长期记忆拆成信息抽取、多会话推理、时间推理、知识更新、弃答五种能力，适合作为统一评测入口。 \\
+Self-Rewarding LMs & 2024 & 模型自评奖励 + Iterative DPO & 自主学习的重要一跳：奖励信号不再外包给人类或独立 reward model，而由模型自己生成。 \\
+SPIN & 2024 & 自博弈式微调 & 展示了“无需新增标注数据”的弱到强自提升路线，可与记忆系统结合成离线巩固模块。 \\
+MemInsight & 2025 & 自主式历史记忆增强 & 不是只做 recall，而是先增强历史记忆的语义表示再检索，强调 memory augmentation 而非 memory lookup。 \\
+MIRIX & 2025 & 六类记忆 + 多 Agent 协调 + 多模态记忆 & 把记忆从单一文本缓存扩展到核心记忆/情景记忆/语义记忆/程序记忆/资源记忆/知识金库，系统性很强。 \\
+MemOS & 2025 & MemCube + 异构记忆统一调度 & 把参数记忆、激活记忆、明文记忆统一成“可治理资源”，适合写成系统架构层面的新趋势。 \\
+LightMem & 2025/2026 & 三阶段层级记忆 + sleep-time update & 很适合补足“效率”与“巩固时机”两项短板：把在线推理和离线巩固分离。 \\
+EvolveR & 2025 & 经验生命周期 + 离线自蒸馏 + 在线强化 & 把“从经验中学”明确写成闭环生命周期，连接 ExpeL / Reflexion 与 Self-Consolidation。 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{新增主线一：结构化长期记忆正在取代朴素向量库}
+
+HippoRAG 提出一种受海马体索引理论启发的长期记忆框架，用知识图谱与 Personalized
+PageRank 组织经验，单步检索即可达到或超过部分迭代式方法的效果，且成本和时延都更低。
+这说明“长期记忆”并不等于“更大的 embedding store”，而更像是\textbf{可遍历、可链接、
+可传播的结构化记忆图}。在这一意义上，HippoRAG 与 A-MEM 形成明显呼应：前者强调
+图结构索引，后者强调 Zettelkasten 式卡片链接，两者共同指向“记忆网络化”趋势。
+\hfill(\href{https://arxiv.org/abs/2405.14831}{HippoRAG, arXiv:2405.14831})
+
+MemInsight 则向前走了一步：它不满足于存历史，而是对历史交互进行\textbf{自主增强}
+（autonomous augmentation），通过更丰富的语义表示提升后续检索与生成质量。相比
+“原样存储 + 相似度召回”，MemInsight 更接近“记忆重写/增广”范式。若与 PAMU 的
+偏好更新思想结合，可以形成“先语义增强，再偏好校正”的双阶段更新框架。
+\hfill(\href{https://arxiv.org/abs/2503.21760}{MemInsight, arXiv:2503.21760})
+
+LightMem 进一步把长期记忆系统分成感觉记忆、短时记忆与长时记忆三层，并把长期记忆
+更新放到离线的 sleep-time update 中，从而将在线回答成本与记忆巩固解耦。这一点非常
+关键：它提示未来 LLM Agent 的记忆维护不应总发生在对话主路径上，而可以在后台或
+批处理阶段完成高成本重组与压缩。对比你当前文稿中的 Mem0、A-MEM 与 PAMU，
+LightMem 最值得补写的是它对\textbf{效率—效果折中}的显式建模。
+\hfill(\href{https://arxiv.org/abs/2510.18866}{LightMem, arXiv:2510.18866})
+
+\subsection{新增主线二：自主学习开始形成“经验闭环”}
+
+如果说 Reflexion 仍然是“试错后写一句反思”，那么 Devil's Advocate、SPIN、
+Self-Rewarding 和 EvolveR 代表的是更完整的自主学习闭环。Devil's Advocate 的价值在于
+把反思前移到动作之前：Agent 不只是事后总结，而是在执行前就预测潜在失败并规划补救路径，
+显著减少反复试错的次数。这种 anticipatory reflection 很适合与 Memory-R1 的管理动作
+空间结合，把“ADD/UPDATE/DELETE/NOOP”之前先做失败预演。
+\hfill(\href{https://arxiv.org/abs/2405.16334}{Devil's Advocate, arXiv:2405.16334})
+
+SPIN 与 Self-Rewarding 则把“学习信号从何而来”这个问题推到了前台。SPIN 用自博弈生成
+新训练样本，并通过迭代区分人类数据与模型自生成数据来完成弱到强提升；Self-Rewarding
+更进一步，让模型自己扮演 judge，生成 reward，再用 Iterative DPO 继续训练。这两篇论文
+虽然不直接属于长期记忆论文，但它们补齐了你原文中“自主学习”维度最薄弱的一块：\textbf{
+没有外部标注时，Agent 如何持续获得学习信号并迭代改进}。
+\hfill(\href{https://arxiv.org/abs/2401.01335}{SPIN, arXiv:2401.01335};
+\href{https://arxiv.org/abs/2401.10020}{Self-Rewarding LMs, arXiv:2401.10020})
+
+EvolveR 则把经验学习正式写成“离线自蒸馏 + 在线交互 + 策略强化”的闭环生命周期。
+它比 ExpeL 更系统，因为 ExpeL 的重点仍是经验抽取与回忆，而 EvolveR 明确要求把交互
+轨迹蒸馏成可复用的策略原则，再在后续任务中主动检索与更新。这条线和 Self-Consolidation
+天然相连：EvolveR 更像\textbf{策略层的经验库闭环}，Self-Consolidation 更像\textbf{参数层的
+经验内化闭环}，两者合起来就是完整的 lifelong agent。
+\hfill(\href{https://arxiv.org/abs/2510.16079}{EvolveR, arXiv:2510.16079};
+\href{https://arxiv.org/abs/2602.01966}{Self-Consolidation, arXiv:2602.01966})
+
+\subsection{新增主线三：记忆正在从“模块”上升为“系统资源”}
+
+MIRIX 与 MemOS 的价值不在于单点指标，而在于它们把记忆看成\textbf{系统级资源}。
+MIRIX 将记忆拆为六类并用多 Agent 协调更新和检索，说明未来记忆系统不会只有一个
+“memory store”，而会区分事实、偏好、程序、资源与安全敏感信息。MemOS 则更进一步，
+试图统一参数记忆、激活记忆和明文记忆，并通过 MemCube 抽象管理记忆内容、来源、
+版本与迁移。这意味着“记忆写入模型权重”与“记忆保存在外部数据库”不应再被视作
+两条割裂路线，而是同一内存层级中的不同存储形态。
+\hfill(\href{https://arxiv.org/abs/2507.07957}{MIRIX, arXiv:2507.07957};
+\href{https://arxiv.org/abs/2507.03724}{MemOS, arXiv:2507.03724})
+
+这一系统视角也能反向解释为什么 Self-Consolidation 值得高度重视：它不是孤立地“做了个
+LoRA 微调”，而是在尝试实现记忆从明文经验向参数记忆的迁移。若将 MemOS 的异构记忆
+治理框架与 Self-Consolidation 的参数蒸馏结合，可以得到一个更强的研究命题：
+\textbf{记忆对象是否应当拥有类型、版本、访问权限以及迁移策略？}
+
+\subsection{建议重写的综述主叙事}
+
+建议将原文“记忆形成—检索—更新—整合”四段式，升级为如下六段式叙事：
+
+\begin{enumerate}
+  \item \textbf{Memory Substrate}：记忆存在哪里（向量库、图结构、分类型记忆、参数、KV/activation）；
+  \item \textbf{Memory Organization}：记忆如何被链接、摘要、增广与重写（A-MEM, HippoRAG, MemInsight）；
+  \item \textbf{Memory Policy}：谁决定写什么、删什么、何时检索（Memory-R1, PAMU）；
+  \item \textbf{Autonomous Learning Signal}：自主学习信号从哪里来（Devil's Advocate, SPIN, Self-Rewarding, EvolveR）；
+  \item \textbf{Consolidation \& Migration}：记忆如何在明文、激活、参数之间迁移（LightMem, Self-Consolidation, MemOS）；
+  \item \textbf{Evaluation}：如何统一评测长期记忆与持续学习（LongMemEval, LoCoMo, WebArena 等）。
+\end{enumerate}
+
+这样的改写会让“memory + 自主学习”真正交叉起来，而不是把自主学习仅当作记忆系统的附属功能。
+
+\subsection{建议新增的研究命题}
+
+\paragraph{命题一：Graph-Memory + RL Policy + Parameter Consolidation}
+可把 HippoRAG / A-MEM 作为结构化外部记忆底座，Memory-R1 作为操作策略层，
+Self-Consolidation 作为参数内化层，形成“图记忆组织—RL 决策—参数巩固”的三层闭环。
+这比单独复现某一篇论文更像真正的新工作。
+
+\paragraph{命题二：Sleep-time Consolidation Triggering}
+当前 LightMem 说明“离线巩固”有效，但\textbf{何时触发巩固}依旧开放。可以研究基于
+不确定度、记忆冲突强度、调用频率与用户偏好漂移速度的触发器，使 sleep-time update
+从启发式变为学习式策略。
+
+\paragraph{命题三：Typed Memory for Lifelong Agents}
+借鉴 MIRIX 和 MemOS，区分 preference memory、episodic memory、procedural memory
+和 secure memory，研究不同类型记忆是否应采用不同的检索器、衰减函数与巩固方式。
+这会明显优于“所有记忆统一编码成一类向量”的做法。
+
+\subsection{建议新增的评测与实验组合}
+
+建议不要只在 LoCoMo 上收敛结论，而应使用至少一组“对话长期记忆 + 一组工具型 Agent
+持续学习”的双场景评测：
+\begin{itemize}
+  \item \textbf{对话长期记忆}：LoCoMo + LongMemEval；
+  \item \textbf{工具型 Agent 学习}：WebArena / ALFWorld；
+  \item \textbf{核心指标}：QA 准确率、长期成功率曲线、记忆库规模增长率、单位任务 token 开销、
+  检索延迟、参数巩固频率、错误复发率（failure recurrence）。
+\end{itemize}
+
+其中，LongMemEval 尤其值得加入，因为它把长期记忆拆成信息抽取、多会话推理、时间推理、
+知识更新和弃答五个维度，更适合作为“记忆系统是否真的会长期学习”的统一基准。
+\hfill(\href{https://arxiv.org/abs/2410.10813}{LongMemEval, arXiv:2410.10813})
+
+\subsection{一句话结论}
+
+下一阶段最值得做的，不是再造一个“更大的记忆库”，而是构建一个\textbf{会组织记忆、会从
+经验中自学、会把高价值经验巩固进参数、还能控制成本与隐私风险的记忆操作系统}。从这个
+角度看，A-MEM / HippoRAG 解决“怎么组织”，Memory-R1 / EvolveR 解决“怎么学习决策”，
+LightMem / Self-Consolidation / MemOS 解决“怎么巩固与迁移”，这三条线的融合最有潜力产出
+真正新颖的工作。
+
+
+%% ===========================================================
+\section{总结}
+%% ===========================================================
+
+本报告系统梳理了 LLM 记忆机制从 2020 年到 2026 年初的演化脉络：从 RAG 的
+\emph{被动检索}，到 MemGPT 的\emph{主动管理}，到 Memory-R1 的\emph{强化学习策略}，
+再到 Self-Consolidation 的\emph{参数内化}，每一代方法都在突破上一代的核心瓶颈。
+
+\begin{center}
+\begin{tabular}{lcl}
+\toprule
+\textbf{代际} & \textbf{代表作} & \textbf{核心突破} \\
+\midrule
+第一代 & RAG, MemGPT & 外部记忆存储与基础检索 \\
+第二代 & Reflexion, MemoryBank & 记忆反思与衰减机制 \\
+第三代 & A-MEM, Mem0, PAMU & 主动组织与动态更新 \\
+第四代 & Memory-R1, Self-Consolidation & RL 策略学习 + 参数整合 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{1em}
+当前最值得关注的工作是 \textbf{Memory-R1}（以极低数据成本实现高质量记忆管理）和
+\textbf{Self-Consolidation}（首次将文本记忆内化为模型参数，开创第四代范式）。
+建议优先复现这两篇工作，并探索二者的融合路径。
+
+%% ===========================================================
+%% References
+%% ===========================================================
+\newpage
+\section*{参考文献}
+\bibliographystyle{unsrt}
+
+\begin{thebibliography}{99}
+
+\bibitem{park2023generative}
+Park, J.~S., et al.
+\newblock Generative agents: Interactive simulacra of human behavior.
+\newblock In \textit{Proceedings of the 36th Annual ACM Symposium on User
+  Interface Software and Technology (UIST)}, 2023.
+
+\bibitem{shinn2023reflexion}
+Shinn, N., et al.
+\newblock Reflexion: Language agents with verbal reinforcement learning.
+\newblock In \textit{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2023.
+
+\bibitem{packer2023memgpt}
+Packer, C., et al.
+\newblock MemGPT: Towards LLMs as operating systems.
+\newblock \textit{arXiv preprint}, arXiv:2310.08560, 2023.
+
+\bibitem{zhong2024memorybank}
+Zhong, W., et al.
+\newblock MemoryBank: Enhancing large language models with long-term memory.
+\newblock In \textit{Proceedings of AAAI}, 2024.
+
+\bibitem{lewis2020retrieval}
+Lewis, P., et al.
+\newblock Retrieval-augmented generation for knowledge-intensive NLP tasks.
+\newblock In \textit{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2020.
+
+\bibitem{asai2023selfrag}
+Asai, A., et al.
+\newblock Self-RAG: Learning to retrieve, generate, and critique through
+  self-reflection.
+\newblock In \textit{International Conference on Learning Representations
+  (ICLR)}, 2024.
+
+\bibitem{evomemory2025}
+Anonymous.
+\newblock Evo-Memory: Benchmarking LLM agent test-time learning with
+  self-evolving memory.
+\newblock \textit{arXiv preprint}, 2025.
+
+\bibitem{condmem2026}
+Anonymous.
+\newblock Conditional memory via scalable lookup: A new axis of sparsity for
+  large language models.
+\newblock \textit{arXiv preprint}, 2026.
+
+\bibitem{xu2025amem}
+Xu, W., et al.
+\newblock A-MEM: Agentic memory for LLM agents.
+\newblock \textit{arXiv preprint}, arXiv:2502.12110, 2025.
+
+\bibitem{chhikara2025mem0}
+Chhikara, P., et al.
+\newblock Mem0: Building production-ready AI agents with scalable long-term
+  memory.
+\newblock \textit{arXiv preprint}, arXiv:2504.19413, 2025.
+
+\bibitem{chen2025memoryr1}
+Chen, J., et al.
+\newblock Memory-R1: Enhancing large language model agents to manage and
+  utilize memories via reinforcement learning.
+\newblock \textit{arXiv preprint}, arXiv:2508.19828, 2025.
+
+\bibitem{wang2025pamu}
+Wang, Z., et al.
+\newblock Preference-aware memory update for long-term LLM agents.
+\newblock \textit{arXiv preprint}, arXiv:2510.09720, 2025.
+
+\bibitem{zhang2026selfcon}
+Zhang, H., et al.
+\newblock Self-consolidation for self-evolving agents.
+\newblock \textit{arXiv preprint}, arXiv:2602.01966, 2026.
+
+\end{thebibliography}
+
+\end{document}

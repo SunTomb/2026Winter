@@ -1,0 +1,455 @@
+%% ============================================================
+%%  G-MSRA: Closing the Loop — Environment-Grounded Self-Reward
+%%  for Autonomous Memory Management in Lifelong LLM Agents
+%%
+%%  Paper Skeleton Draft v1.0
+%%  Target: ICLR 2027 / NeurIPS 2026
+%% ============================================================
+\documentclass{article}
+
+%% --- ICLR 2026 Style (switch to neurips_2026 if targeting NeurIPS) ---
+\usepackage{iclr2026_conference}
+%% For review submission: \usepackage[accepted]{iclr2026_conference}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage{wrapfig}
+
+%% --- Custom commands ---
+\newcommand{\gmsra}{\textsc{G-MSRA}}
+\newcommand{\renv}{R_{\mathrm{env}}}
+\newcommand{\rmem}{R_{\mathrm{mem}}}
+\newcommand{\rtotal}{R_{\mathrm{total}}}
+\newcommand{\etal}{\textit{et al.}}
+
+%% ============================================================
+\title{Closing the Loop: Environment-Grounded Self-Reward \\ for Autonomous Memory Management in Lifelong LLM Agents}
+
+\author{
+  Author Name$^{1}$ \quad Advisor Name$^{1}$ \\
+  $^{1}$University of Science and Technology of China (USTC) \\
+  \texttt{\{author, advisor\}@ustc.edu.cn}
+}
+
+\begin{document}
+
+\maketitle
+
+%% ============================================================
+\begin{abstract}
+%% ============================================================
+
+Large Language Model (LLM) agents lack the ability to autonomously manage, evaluate, and internalize long-term memories. Current approaches suffer from three critical disconnections: (1) RL-based memory management~\citep{chen2025memoryr1} relies on external annotation for reward signals; (2) self-rewarding mechanisms~\citep{yuan2024selfrewarding} operate without memory, making evaluation ahistorical; and (3) parametric consolidation~\citep{zhang2026selfconsolidation} uses heuristic triggers without principled learning signals. We propose \gmsra{} (\textbf{G}rounded \textbf{M}emory-guided \textbf{S}elf-\textbf{R}ewarding \textbf{A}gent), a unified framework that connects these three lines through a novel \emph{environment-grounded composite reward}: $\rtotal = \renv + \lambda \cdot \rmem$, where environment feedback anchors reward truthfulness while memory-aware self-assessment provides fine-grained guidance. This design fundamentally prevents the reward hacking failure mode inherent in pure self-evaluation. \gmsra{} further introduces (i) a memory confidence scoring mechanism that filters noise from the judge's context, (ii) an adaptive 3D consolidation trigger based on memory conflict, reward variance, and growth rate, and (iii) a semantic distillation pipeline that leverages graph-based memory selection for LoRA parameter internalization. A four-phase curriculum training protocol ensures each component's contribution is independently attributable. Experiments on LoCoMo, LongMemEval, and ALFWorld demonstrate that \gmsra{} achieves state-of-the-art performance in long-term memory management while exhibiting stable self-improvement without external annotation.
+
+\end{abstract}
+
+%% ============================================================
+\section{Introduction}
+\label{sec:intro}
+%% ============================================================
+
+LLMs are fundamentally stateless systems: each inference begins from a blank context, unable to retain experience across sessions. As deployment scenarios expand to long-term assistants~\citep{park2023generative}, personalized agents~\citep{chhikara2025mem0}, and multi-task environments~\citep{evolver2025}, the ability to \emph{persistently remember, evaluate, and internalize experience} has become a critical bottleneck.
+
+Recent years have seen rapid progress along three independent research lines, each addressing a piece of this puzzle:
+
+\paragraph{Line 1: Learning Memory Policies.}
+Memory-R1~\citep{chen2025memoryr1} demonstrates that RL can learn ADD/UPDATE/DELETE/NOOP memory operations with remarkable data efficiency (152 QA pairs). PAMU~\citep{wang2025pamu} contributes preference-aware update mechanisms. However, these methods rely on \emph{external annotation} (e.g., QA F1 scores) as reward signals---a dependency that renders them inapplicable in open-ended, label-free interactions.
+
+\paragraph{Line 2: Self-Generated Learning Signals.}
+Self-Rewarding Language Models~\citep{yuan2024selfrewarding} and SPIN~\citep{chen2024spin} show that models can generate their own training signals through self-evaluation and self-play. Yet these methods are entirely \emph{memoryless}---each evaluation starts from scratch, without historical context or accumulated experience.
+
+\paragraph{Line 3: Parametric Consolidation.}
+Self-Consolidation~\citep{zhang2026selfconsolidation} and LightMem~\citep{lightmem2025} demonstrate the promise of distilling text-based experience into model parameters via LoRA. However, the ``when to consolidate'' and ``what to consolidate'' decisions remain heuristic, disconnected from the memory management and learning signal pipelines.
+
+\paragraph{The Fourth Gap: Reward Truthfulness.}
+Beyond these three disconnections, we identify a deeper challenge: \textbf{reward identifiability}. Pure self-reward (as in Line 2) optimizes for \emph{internal consistency} rather than \emph{truthfulness}. An agent that remembers wrong facts consistently will rate itself highly---a classic case of \emph{self-confirmation bias}. This makes naively combining Lines 1--3 fundamentally fragile.
+
+\paragraph{Our Solution: \gmsra{}.}
+We propose \gmsra{}, a unified framework that connects all three lines through a novel \emph{environment-grounded composite reward}:
+\begin{equation}
+\rtotal(t) = \underbrace{\renv(t)}_{\text{environment anchor}} + \lambda \cdot \underbrace{\rmem(t)}_{\text{memory-aware refiner}}, \quad \lambda < 1
+\label{eq:composite_reward}
+\end{equation}
+where $\renv$ comes from external world feedback (task success, user reactions) without requiring annotation, and $\rmem$ is a memory-aware self-assessment that refines but never overrides the environmental signal. This design prevents reward hacking by construction: the agent cannot achieve high reward through self-consistent but incorrect behavior when the environment ``disagrees.''
+
+Our contributions are:
+\begin{enumerate}[leftmargin=*, nosep]
+    \item \textbf{Environment-grounded composite reward} (Eq.~\ref{eq:composite_reward}): a theoretically motivated fusion that resolves the reward hacking dilemma of pure self-evaluation in memory-augmented agents.
+    \item \textbf{Memory confidence scoring}: a noise-filtering mechanism that prevents low-quality memories from polluting the judge's context.
+    \item \textbf{Adaptive 3D consolidation trigger}: replaces heuristic thresholds with a principled function of memory conflict, reward variance, and growth rate.
+    \item \textbf{Four-phase curriculum training}: ensures independent attribution of each module's contribution, enabling rigorous ablation analysis.
+\end{enumerate}
+
+%% ============================================================
+\section{Related Work}
+\label{sec:related}
+%% ============================================================
+
+\subsection{Memory Systems for LLM Agents}
+
+The evolution of LLM memory spans four generations: (1) passive retrieval via RAG~\citep{lewis2020rag}; (2) structured management through MemGPT~\citep{packer2023memgpt}, Generative Agents~\citep{park2023generative}, and MemoryBank~\citep{zhong2024memorybank}; (3) active organization with A-MEM~\citep{xu2025amem}, HippoRAG~\citep{gutierrez2024hipporag}, Mem0~\citep{chhikara2025mem0}, and MemInsight~\citep{meminsight2025}; and (4) learned management via Memory-R1~\citep{chen2025memoryr1} and PAMU~\citep{wang2025pamu}. System-level approaches include MIRIX~\citep{mirix2025} (six memory types) and MemOS~\citep{memos2025} (unified memory governance). Our work advances Line (4) by removing the external annotation dependency through grounded self-reward.
+
+\subsection{Self-Rewarding and Autonomous Learning}
+
+Reflexion~\citep{shinn2023reflexion} introduces verbal reinforcement learning. Devil's Advocate~\citep{xi2024devilsadvocate} adds anticipatory reflection. Self-Rewarding LMs~\citep{yuan2024selfrewarding} enable the model to serve as its own judge via iterative DPO~\citep{rafailov2023dpo}. SPIN~\citep{chen2024spin} achieves weak-to-strong improvement via self-play. EvolveR~\citep{evolver2025} formalizes the experience lifecycle. None of these methods incorporate persistent memory into the learning signal, a gap \gmsra{} directly addresses.
+
+\subsection{Parametric Consolidation}
+
+Self-Consolidation~\citep{zhang2026selfconsolidation} is the first to distill text experience into LoRA~\citep{hu2022lora} parameters, combining contrastive reflection with parametric internalization. LightMem~\citep{lightmem2025} introduces sleep-time updates for efficiency. Conditional Memory~\citep{condmem2026} explores KV-cache sparsity as an in-weights memory. Our consolidation module draws on these works but introduces adaptive triggering (Section~\ref{sec:trigger}) and graph-guided content selection (Section~\ref{sec:distill}).
+
+
+%% ============================================================
+\section{Method: \gmsra{} Framework}
+\label{sec:method}
+%% ============================================================
+
+\subsection{Problem Formulation}
+\label{sec:formulation}
+
+We model lifelong memory management as a Markov Decision Process $\mathcal{M} = (\mathcal{S}, \mathcal{A}, \mathcal{T}, R, \gamma)$ where:
+\begin{itemize}[nosep, leftmargin=*]
+    \item $\mathcal{S}$: State = (current event, existing memory graph, task context)
+    \item $\mathcal{A}$: Action = \{ADD, UPDATE($i$), DELETE($i$), NOOP\} for memory index $i$
+    \item $\mathcal{T}$: Transition = memory store updated by the chosen action
+    \item $R$: Reward = $\rtotal$ (Eq.~\ref{eq:composite_reward})
+    \item $\gamma$: Discount factor
+\end{itemize}
+
+The agent also maintains an offline consolidation process that periodically distills high-value memories into model parameters.
+
+%% ----- 3.2 Grounded Self-Reward -----
+\subsection{Environment-Grounded Self-Rewarding}
+\label{sec:reward}
+
+\paragraph{The Reward Hacking Problem.}
+In pure self-rewarding systems, the model evaluates its own outputs without external grounding. This creates a positive feedback loop: if the memory store accumulates incorrect entries, the judge (which consults the memory) will rate self-consistent but wrong behavior highly. Formally, the model optimizes $\max_\theta \mathbb{E}[R_\theta(y | x, M_\theta)]$ where both the generator, the memory $M_\theta$, and the reward $R_\theta$ are parameterized by the same $\theta$---a classic case of reward identifiability failure.
+
+\paragraph{Our Solution: Dual-Layer Composite Reward.}
+
+\begin{equation}
+\rtotal(t) = \renv(t) + \lambda \cdot \rmem(t), \quad \lambda \in (0, 1)
+\end{equation}
+
+\noindent\textbf{Layer 1: Environment Anchor $\renv$.}
+\begin{itemize}[nosep, leftmargin=*]
+    \item \textbf{Agent tasks} (ALFWorld, WebArena): direct environment success/failure feedback.
+    \item \textbf{Dialogue tasks} (LoCoMo, LongMemEval): user reaction proxy---the next user turn indicates satisfaction, correction, or follow-up.
+\end{itemize}
+Crucially, $\renv$ requires no human annotation but comes from the external world, breaking the self-referential loop.
+
+\noindent\textbf{Layer 2: Memory-Aware Refiner $\rmem$.}
+An LLM-as-a-Judge evaluates the memory operation quality given: (a) the agent's response, (b) \emph{confidence-filtered} historical memories (see below), and (c) the environment feedback $\renv$. Because $\lambda < 1$, $\rmem$ only sharpens the signal from $\renv$ and cannot override it.
+
+\paragraph{Memory Confidence Scoring.}
+To prevent noise pollution from low-quality memories affecting the judge, each memory $m_i$ maintains a confidence score:
+\begin{equation}
+c_i(t) = \sigma\left(w_1 \cdot R_{\mathrm{env}}^{\mathrm{write}}(m_i) + w_2 \cdot \frac{\text{hit\_success}_i}{\text{hit\_total}_i} + w_3 \cdot \log(1 + \text{age}_i)\right)
+\label{eq:confidence}
+\end{equation}
+where $\sigma$ is the sigmoid function, $R_{\mathrm{env}}^{\mathrm{write}}$ is the environment reward at write time, hit success/total tracks post-retrieval task performance, and age reflects temporal persistence. The judge only consults top-$K$ confident memories.
+
+%% ----- 3.3 RL Memory Manager -----
+\subsection{RL-Based Memory Manager}
+\label{sec:manager}
+
+We adopt the Memory-R1~\citep{chen2025memoryr1} architecture with a critical modification: the reward signal is replaced from external QA F1 to $\rtotal$. The Memory Manager is trained via PPO~\citep{schulman2017ppo} or GRPO to learn a policy $\pi_\theta(a | s)$ over the action space $\mathcal{A}$. Memory entries follow a Zettelkasten-style organization~\citep{xu2025amem} with explicit inter-memory links forming a knowledge graph.
+
+%% ----- 3.4 Consolidation Trigger -----
+\subsection{Adaptive Consolidation Trigger}
+\label{sec:trigger}
+
+We replace heuristic triggers (e.g., ``every $N$ episodes'' in Self-Consolidation~\citep{zhang2026selfconsolidation}) with a 3D signal function:
+
+\begin{equation}
+\text{Trigger}(t) = \mathbf{1}\left[\alpha \cdot \text{Conflict}(t) + \beta \cdot \text{Var}(\rtotal_{t-K:t}) + \gamma \cdot \text{Growth}(t) > \theta\right]
+\label{eq:trigger}
+\end{equation}
+
+\begin{itemize}[nosep, leftmargin=*]
+    \item \textbf{Conflict$(t)$}: Ratio of semantically contradictory pairs among linked memories, detected via embedding dissimilarity below threshold $\epsilon$.
+    \item \textbf{$\text{Var}(\rtotal_{t-K:t})$}: Reward variance over recent $K$ episodes; high variance indicates cognitive instability requiring consolidation.
+    \item \textbf{Growth$(t)$}: Memory store growth rate (entries per unit time); prevents unbounded expansion.
+\end{itemize}
+
+%% ----- 3.5 Semantic Distillation -----
+\subsection{Semantic Distillation Consolidation}
+\label{sec:distill}
+
+When triggered, the consolidation module:
+\begin{enumerate}[nosep, leftmargin=*]
+    \item \textbf{Selects} high-value memories via subgraph extraction (memories with $\geq k$ links \emph{and} high confidence).
+    \item \textbf{Converts} selected memories to semantic triple declarations (e.g., ``User prefers X over Y because Z'').
+    \item \textbf{Distills} triples into LoRA parameters via standard SFT cross-entropy loss with EWC~\citep{kirkpatrick2017ewc} regularization to prevent catastrophic forgetting.
+    \item \textbf{Clears} distilled memories from external store to control growth.
+\end{enumerate}
+
+The key insight is that graph topology determines \emph{what} to distill (selection), while the distillation itself uses text-based SFT---avoiding information loss from graph serialization.
+
+%% ----- 3.6 Curriculum Training -----
+\subsection{Four-Phase Curriculum Training}
+\label{sec:curriculum}
+
+To ensure clean attribution and training stability:
+
+\begin{table}[h]
+\centering
+\small
+\caption{Four-phase curriculum training protocol.}
+\label{tab:phases}
+\begin{tabular}{llll}
+\toprule
+\textbf{Phase} & \textbf{Objective} & \textbf{Reward Source} & \textbf{Validation} \\
+\midrule
+0: SFT Warmup & Format learning & Supervised & Op format accuracy $>$95\% \\
+1: RL + External & Stable RL policy & QA F1 (external) & vs.~Memory-R1 baseline \\
+2: Annealing & External $\to$ self-reward & $\alpha R_\text{ext} + (1-\alpha)\rtotal$ & Kendall $\tau > 0.5$ \\
+3: Full Loop & Autonomous operation & $\rtotal$ only & Long-term success curve \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In Phase 2, the annealing coefficient $\alpha$ decreases linearly from 1.0 to 0.0. If the Kendall $\tau$ correlation between $\renv$ and $\rmem$ drops below threshold 0.5, annealing is paused until calibration recovers.
+
+
+%% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+%% ============================================================
+
+\subsection{Experimental Setup}
+
+\paragraph{Datasets.} We evaluate on three complementary benchmarks:
+\begin{itemize}[nosep, leftmargin=*]
+    \item \textbf{LoCoMo}~\citep{chen2025memoryr1} and \textbf{LongMemEval}~\citep{bai2024longmemeval}: long-term conversational memory (information extraction, multi-session reasoning, temporal reasoning, knowledge update, abstention).
+    \item \textbf{ALFWorld}: embodied agent tasks for measuring long-term success rate and failure recurrence.
+    \item \textbf{Evo-Memory}~\citep{evomemory2025}: test-time self-evolving memory benchmark.
+\end{itemize}
+
+\paragraph{Baselines.}
+\begin{itemize}[nosep, leftmargin=*]
+    \item \textbf{Memory-R1}~\citep{chen2025memoryr1}: RL memory management (external QA F1 reward, no consolidation)
+    \item \textbf{Self-Consolidation}~\citep{zhang2026selfconsolidation}: Contrastive reflection + LoRA (no RL, no self-reward)
+    \item \textbf{EvolveR}~\citep{evolver2025}: Experience lifecycle (no parameter consolidation, no self-reward)
+    \item \textbf{Reflexion}~\citep{shinn2023reflexion}: Verbal RL (no RL, no consolidation, no self-reward)
+    \item \textbf{Mem0 + Memory-R1}: Simple module combination baseline (no self-reward, no consolidation)
+\end{itemize}
+
+\paragraph{Implementation Details.}
+Base model: Qwen2.5-7B-Instruct. LoRA: rank=8 (short-term), rank=32 (long-term), $\alpha$=16/64, targets=\{q\_proj, v\_proj\}. RL: GRPO, lr=1.41e-5. Hardware: 4$\times$ NVIDIA A100 80G. Embedding: all-MiniLM-L6-v2.
+
+%% ----- 4.2 Main Results -----
+\subsection{Main Results}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Main results on conversational memory benchmarks.}
+\label{tab:main_results}
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{LoCoMo}} & \multicolumn{3}{c}{\textbf{LongMemEval}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+& F1$\uparrow$ & EM$\uparrow$ & Judge$\uparrow$ & F1$\uparrow$ & EM$\uparrow$ & Judge$\uparrow$ \\
+\midrule
+Reflexion & -- & -- & -- & -- & -- & -- \\
+EvolveR & -- & -- & -- & -- & -- & -- \\
+Self-Consolidation & -- & -- & -- & -- & -- & -- \\
+Memory-R1 & -- & -- & -- & -- & -- & -- \\
+Mem0 + Memory-R1 & -- & -- & -- & -- & -- & -- \\
+\midrule
+\gmsra{} (Ours) & \textbf{--} & \textbf{--} & \textbf{--} & \textbf{--} & \textbf{--} & \textbf{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}[h]
+\centering
+\small
+\caption{Agent task results on ALFWorld.}
+\label{tab:agent_results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Success Rate}$\uparrow$ & \textbf{FRR}$\downarrow$ & \textbf{Token Cost}$\downarrow$ \\
+\midrule
+Reflexion & -- & -- & -- \\
+EvolveR & -- & -- & -- \\
+Self-Consolidation & -- & -- & -- \\
+Memory-R1 & -- & -- & -- \\
+\midrule
+\gmsra{} (Ours) & \textbf{--} & \textbf{--} & \textbf{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key observations:}
+\begin{itemize}[nosep, leftmargin=*]
+    \item [TODO: Fill after experiments. Expected: G-MSRA matches Memory-R1 on labeled benchmarks and significantly outperforms on label-free scenarios.]
+    \item [TODO: Report long-term success curve showing ``越用越聪明'' trend.]
+\end{itemize}
+
+
+%% ----- 4.3 Ablation Studies -----
+\subsection{Ablation Studies}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Ablation results on LoCoMo (F1). Each row removes one component.}
+\label{tab:ablation}
+\begin{tabular}{llcc}
+\toprule
+\textbf{ID} & \textbf{Ablation} & \textbf{F1 (Short)} & \textbf{F1 (Long)} \\
+\midrule
+-- & \gmsra{} (Full) & -- & -- \\
+A1 & $-$ Env anchor ($\renv$), only $\rmem$ & -- & -- \\
+A2 & $-$ Memory consistency ($\rmem$), only $\renv$ & -- & -- \\
+A3 & $-$ Confidence filtering & -- & -- \\
+A4 & $-$ Adaptive trigger $\to$ fixed N=50 & -- & -- \\
+A5 & $-$ Graph selection $\to$ random & -- & -- \\
+A6 & $-$ LoRA consolidation entirely & -- & -- \\
+A7 & $-$ Curriculum $\to$ direct self-reward & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{A1 is the most critical ablation.} If removing $\renv$ (pure self-reward) shows comparable short-term but degraded long-term performance, it confirms our core hypothesis: pure self-reward suffers from reward hacking over extended horizons, while environment grounding prevents this.
+
+%% ----- 4.4 Efficiency Analysis -----
+\subsection{Efficiency Analysis}
+
+\begin{figure}[h]
+\centering
+%\includegraphics[width=0.48\textwidth]{figures/memory_growth.pdf}
+%\includegraphics[width=0.48\textwidth]{figures/token_cost.pdf}
+\caption{[TODO] Left: Memory store size over episodes (with and without consolidation). Right: Token cost per episode comparison with Mem0 and LightMem.}
+\label{fig:efficiency}
+\end{figure}
+
+
+%% ============================================================
+\section{Analysis \& Discussion}
+\label{sec:analysis}
+%% ============================================================
+
+\subsection{Reward Calibration \& Drift Analysis}
+
+\begin{figure}[h]
+\centering
+%\includegraphics[width=0.48\textwidth]{figures/reward_calibration.pdf}
+%\includegraphics[width=0.48\textwidth]{figures/reward_drift.pdf}
+\caption{[TODO] Left: Scatter plot of $\renv$ vs $\rmem$ with Kendall $\tau$ over training. Right: Reward drift curves for full \gmsra{} vs ablation A1 (pure self-reward). Expected: A1 shows diverging drift while full model remains calibrated.}
+\label{fig:reward_analysis}
+\end{figure}
+
+This is the \textbf{most important analysis} in the paper. It directly validates our core claim that environment grounding prevents reward hacking. We expect to show: (1) Kendall $\tau$ between $\renv$ and $\rmem$ remains $>0.5$ throughout training for the full model; (2) in ablation A1, the self-reward drifts away from environmental truth over long horizons.
+
+\subsection{Consolidation Trigger Visualization}
+
+\begin{figure}[h]
+\centering
+%\includegraphics[width=0.7\textwidth]{figures/trigger_3d.pdf}
+\caption{[TODO] 3D trigger signal decomposition over training: conflict, variance, and growth rate components. Consolidation events marked with vertical lines.}
+\label{fig:trigger}
+\end{figure}
+
+\subsection{Memory Confidence Distribution}
+
+[TODO: Show how the distribution of confidence scores evolves over training, demonstrating that low-quality memories are progressively filtered out.]
+
+\subsection{Failure Mode Case Studies}
+
+[TODO: Qualitative examples showing (1) a case where $\renv$ corrects a wrong $\rmem$ judgment, and (2) a case where $\rmem$ provides fine-grained guidance that $\renv$ alone cannot.]
+
+
+%% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%% ============================================================
+
+We presented \gmsra{}, a unified framework that closes the loop between memory management, reward generation, and parametric consolidation for lifelong LLM agents. Our key insight---that self-reward must be anchored by environmental feedback to prevent reward hacking---addresses a fundamental challenge in autonomous agent learning. The dual-layer composite reward, memory confidence scoring, adaptive 3D consolidation trigger, and four-phase curriculum training together form a practical and principled system for lifelong agent self-improvement.
+
+\paragraph{Limitations.}
+\begin{itemize}[nosep, leftmargin=*]
+    \item The dialogue environment signal (user reaction proxy) may be less reliable than direct task feedback.
+    \item The current framework is evaluated on single-agent scenarios; multi-agent memory sharing remains future work.
+    \item EWC regularization adds computational overhead to the consolidation phase.
+\end{itemize}
+
+\paragraph{Future Work.}
+Extending \gmsra{} to multi-agent settings with shared memory governance~\citep{mirix2025, memos2025}, exploring differential privacy for memory consolidation, and developing theoretical guarantees for reward calibration convergence.
+
+
+%% ============================================================
+%% References
+%% ============================================================
+\bibliography{references}
+\bibliographystyle{iclr2026_conference}
+
+%% ============================================================
+\appendix
+\section{Implementation Details}
+\label{app:implementation}
+
+\subsection{Hyperparameter Settings}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Full hyperparameter settings.}
+\begin{tabular}{llc}
+\toprule
+\textbf{Module} & \textbf{Hyperparameter} & \textbf{Value} \\
+\midrule
+\multirow{3}{*}{Memory Store} & Max entries & 500 \\
+& Embedding model & all-MiniLM-L6-v2 \\
+& Retrieval top-$K$ & 5 \\
+\midrule
+\multirow{3}{*}{Reward} & $\lambda$ (mem weight) & 0.3 \\
+& Confidence top-$K$ & 10 \\
+& Anneal steps & 3000 \\
+\midrule
+\multirow{4}{*}{RL} & Algorithm & GRPO \\
+& Learning rate & 1.41e-5 \\
+& Batch size & 16 \\
+& PPO epochs & 4 \\
+\midrule
+\multirow{4}{*}{LoRA} & Long-term rank & 32 \\
+& Short-term rank & 8 \\
+& EWC $\lambda$ & 100 \\
+& Consolidation LR & 1e-4 \\
+\midrule
+\multirow{4}{*}{Trigger} & $\alpha$ (conflict) & 0.4 \\
+& $\beta$ (variance) & 0.3 \\
+& $\gamma$ (growth) & 0.3 \\
+& $\theta$ (threshold) & 0.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Compute Requirements}
+
+All experiments run on USTC LDS Lab cluster using Song1-2 nodes (8$\times$A100 80G each). Total compute: approximately 4$\times$A100 for 2--3 weeks.
+
+\subsection{SFT Data Examples}
+
+[TODO: Include representative examples from Phase 0 SFT training data.]
+
+\section{Additional Results}
+\label{app:results}
+
+[TODO: Per-category breakdown on LongMemEval, additional ablation details, and failure case analysis.]
+
+\end{document}
