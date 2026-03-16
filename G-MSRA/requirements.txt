@@ -15,7 +15,7 @@ peft>=0.10.0
 bitsandbytes>=0.43.0  # QLoRA 4-bit support
 
 # Retrieval
-faiss-gpu>=1.7.4
+#faiss-gpu>=1.7.4
 sentence-transformers>=2.6.0
 
 # Evaluation
