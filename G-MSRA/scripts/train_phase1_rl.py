@@ -186,31 +186,56 @@ def main(args):
     agent.initialize(model, tokenizer, env_type="dialogue")
 
     # --- Setup RL training with TRL ---
-    try:
-        from trl import GRPOConfig, GRPOTrainer
-        use_grpo = True
-        logger.info("Using TRL GRPOTrainer for RL training")
-    except ImportError:
-        try:
-            from trl import PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
-            use_grpo = False
-            logger.info("GRPOTrainer not available, falling back to PPOTrainer")
-        except ImportError:
-            logger.warning("TRL RL trainers not available, using manual REINFORCE")
-            use_grpo = None
+    # Strategy: try each trainer at RUNTIME (not just import).
+    # TRL's API is extremely fragmented across versions:
+    #   - GRPOTrainer: needs trl>=0.14 + PyTorch with FSDPModule
+    #   - PPOTrainer: API changed in trl 0.12 (no longer accepts model= kwarg)
+    #   - REINFORCE: always works, our reliable fallback
+    #
+    # We try GRPO → PPO → REINFORCE, catching runtime errors at each tier.
 
-    if use_grpo is True:
-        _train_with_grpo(model, tokenizer, dataset, agent, config, args)
-    elif use_grpo is False:
-        _train_with_ppo(model, tokenizer, dataset, agent, config, args)
-    else:
+    trained = False
+
+    # --- Tier 1: GRPOTrainer (best for single-GPU, DeepSeek R1 style) ---
+    if not trained:
+        try:
+            from trl import GRPOConfig, GRPOTrainer
+            logger.info("Attempting GRPOTrainer...")
+            _train_with_grpo(model, tokenizer, dataset, agent, config, args)
+            trained = True
+        except ImportError as e:
+            logger.warning(f"GRPOTrainer import failed: {e}")
+        except TypeError as e:
+            logger.warning(f"GRPOTrainer construction failed (API mismatch): {e}")
+        except Exception as e:
+            logger.warning(f"GRPOTrainer failed at runtime: {e}")
+
+    # --- Tier 2: PPOTrainer (version-adaptive) ---
+    if not trained:
+        try:
+            logger.info("Attempting PPOTrainer...")
+            _train_with_ppo(model, tokenizer, dataset, agent, config, args)
+            trained = True
+        except ImportError as e:
+            logger.warning(f"PPOTrainer import failed: {e}")
+        except TypeError as e:
+            logger.warning(f"PPOTrainer construction failed (API mismatch): {e}")
+        except Exception as e:
+            logger.warning(f"PPOTrainer failed at runtime: {e}")
+
+    # --- Tier 3: Manual REINFORCE (always works) ---
+    if not trained:
+        logger.info("Using manual REINFORCE (no TRL dependency)")
         _train_with_reinforce(model, tokenizer, dataset, agent, config, args)
 
     logger.info("Phase 1 complete!")
 
 
 def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
-    """Train using TRL's GRPOTrainer (preferred method)."""
+    """Train using TRL's GRPOTrainer (preferred method).
+
+    Requires: trl >= 0.14, PyTorch with FSDPModule support.
+    """
     from trl import GRPOConfig, GRPOTrainer
     from datasets import Dataset as HFDataset
 
@@ -239,7 +264,6 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
         for i, completion in enumerate(completions):
             idx = i % len(meta_store)
             meta = meta_store[idx]
-            # Extract the actual text from completion
             if isinstance(completion, list):
                 text = completion[0] if completion else ""
             else:
@@ -268,7 +292,7 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
         save_total_limit=3,
         max_completion_length=256,
         num_generations=config.rl.batch_size,
-        report_to="wandb",
+        report_to="none",
         bf16=True,
     )
 
@@ -290,35 +314,73 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
 
 
 def _train_with_ppo(model, tokenizer, dataset, agent, config, args):
-    """Fallback: Train using TRL's PPOTrainer."""
-    from trl import PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
+    """Fallback: Train using TRL's PPOTrainer.
 
-    # Wrap model with value head
-    ppo_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        model if isinstance(model, str) else model
-    )
+    Handles multiple TRL versions:
+      - trl < 0.12: PPOTrainer(model=..., config=..., tokenizer=...)
+      - trl 0.12+:  PPOTrainer(config=PPOConfig(model_name=...))
+      - trl 0.14+:  PPOTrainer(args=PPOConfig(...), ...)
+    """
+    from trl import PPOConfig
 
-    ppo_config = PPOConfig(
-        model_name=args.model_name,
-        learning_rate=config.rl.learning_rate,
-        batch_size=config.rl.batch_size,
-        mini_batch_size=config.rl.mini_batch_size,
-        gradient_accumulation_steps=config.rl.gradient_accumulation_steps,
-        ppo_epochs=config.rl.ppo_epochs,
-        log_with="wandb",
-    )
+    # --- Detect TRL version to pick correct API ---
+    import trl
+    trl_version = getattr(trl, "__version__", "0.0.0")
+    logger.info(f"TRL version detected: {trl_version}")
 
-    ppo_trainer = PPOTrainer(
-        model=ppo_model,
-        config=ppo_config,
-        tokenizer=tokenizer,
-    )
+    trl_major_minor = tuple(int(x) for x in trl_version.split(".")[:2])
 
-    # Training loop
+    # Try old-style PPOTrainer first (trl < 0.12)
+    if trl_major_minor < (0, 12):
+        from trl import PPOTrainer, AutoModelForCausalLMWithValueHead
+        logger.info("Using PPOTrainer (trl < 0.12 API: model= kwarg)")
+
+        ppo_model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
+
+        ppo_config = PPOConfig(
+            learning_rate=config.rl.learning_rate,
+            batch_size=config.rl.batch_size,
+            mini_batch_size=config.rl.mini_batch_size,
+            gradient_accumulation_steps=config.rl.gradient_accumulation_steps,
+        )
+
+        ppo_trainer = PPOTrainer(
+            model=ppo_model,
+            config=ppo_config,
+            tokenizer=tokenizer,
+        )
+    else:
+        # trl >= 0.12: PPOTrainer internally loads the model
+        # We must pass model_name string, not a pre-loaded model object
+        from trl import PPOTrainer
+
+        logger.info("Using PPOTrainer (trl >= 0.12 API: internal model init)")
+
+        # Build config with model_name for internal loading
+        model_name = args.model_name
+
+        ppo_config = PPOConfig(
+            model_name=model_name,
+            learning_rate=config.rl.learning_rate,
+            batch_size=config.rl.batch_size,
+            mini_batch_size=config.rl.mini_batch_size,
+            gradient_accumulation_steps=config.rl.gradient_accumulation_steps,
+        )
+
+        # trl 0.12+ handles model loading internally
+        ppo_trainer = PPOTrainer(config=ppo_config)
+
+    # --- Training loop (same for all versions) ---
     best_reward = -float("inf")
     all_prompts = []
     for episode in dataset[:config.rl.num_episodes]:
         all_prompts.extend(build_rl_prompts_from_episode(episode))
+
+    # Determine device
+    try:
+        device = ppo_trainer.model.pretrained_model.device
+    except AttributeError:
+        device = next(ppo_trainer.model.parameters()).device
 
     for batch_start in range(0, len(all_prompts), config.rl.batch_size):
         batch = all_prompts[batch_start:batch_start + config.rl.batch_size]
@@ -336,7 +398,7 @@ def _train_with_ppo(model, tokenizer, dataset, agent, config, args):
         response_tensors = []
         for qt in query_tensors:
             response = ppo_trainer.generate(
-                qt.unsqueeze(0).to(ppo_model.pretrained_model.device),
+                qt.unsqueeze(0).to(device),
                 max_new_tokens=256,
                 do_sample=True,
                 temperature=0.7,
@@ -371,6 +433,7 @@ def _train_with_ppo(model, tokenizer, dataset, agent, config, args):
 
         if avg_reward > best_reward:
             best_reward = avg_reward
+            os.makedirs(os.path.join(args.output_dir, "best"), exist_ok=True)
             ppo_trainer.save_pretrained(os.path.join(args.output_dir, "best"))
 
     logger.info(f"PPO training complete. Best reward={best_reward:.4f}")
