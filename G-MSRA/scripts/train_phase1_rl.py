@@ -453,8 +453,34 @@ def _train_with_reinforce(model, tokenizer, dataset, agent, config, args):
         )
         model = get_peft_model(model, lora_config)
 
+    # CRITICAL: PeftModel.from_pretrained() loads LoRA weights with
+    # requires_grad=False. We must re-enable gradients explicitly.
+    for name, param in model.named_parameters():
+        if any(k in name.lower() for k in ["lora", "adapter", "modules_to_save"]):
+            param.requires_grad = True
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    trainable_count = sum(p.numel() for p in trainable_params)
+    total_count = sum(p.numel() for p in model.parameters())
+    logger.info(
+        f"REINFORCE: {trainable_count:,} trainable / {total_count:,} total params "
+        f"({100*trainable_count/max(total_count,1):.2f}%)"
+    )
+
+    if trainable_count == 0:
+        logger.error("No trainable parameters found! Cannot train.")
+        logger.info("Attempting to make lm_head trainable as fallback...")
+        for name, param in model.named_parameters():
+            if "lm_head" in name or "embed" in name:
+                param.requires_grad = True
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        trainable_count = sum(p.numel() for p in trainable_params)
+        if trainable_count == 0:
+            raise RuntimeError("Still no trainable params after fallback. Check model loading.")
+
+    # Only pass trainable params to optimizer (avoids errors with frozen/quantized params)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.rl.learning_rate
+        trainable_params, lr=config.rl.learning_rate
     )
 
     best_avg_reward = -float("inf")
@@ -468,7 +494,7 @@ def _train_with_reinforce(model, tokenizer, dataset, agent, config, args):
     for step_idx, item in enumerate(all_prompts):
         query = item["query"]
 
-        # Forward pass: generate response
+        # Forward pass: generate response (no grad needed for sampling)
         inputs = tokenizer(
             query, return_tensors="pt", truncation=True, max_length=1024
         )
@@ -494,20 +520,31 @@ def _train_with_reinforce(model, tokenizer, dataset, agent, config, args):
         )
         reward_history.append(reward)
 
-        # REINFORCE: -R * log p(response | query)
-        full_ids = outputs[0].unsqueeze(0)
+        # REINFORCE: -(R - baseline) * log p(response | query)
+        # Re-run forward pass WITH gradients to get log-prob loss
+        full_ids = outputs[0].unsqueeze(0).to(model.device)
         labels = full_ids.clone()
         labels[0, :inputs["input_ids"].shape[1]] = -100  # Mask prompt
 
         outputs_with_loss = model(full_ids, labels=labels)
-        loss = -reward * outputs_with_loss.loss  # REINFORCE gradient
 
-        # Baseline subtraction (running mean)
+        # Baseline subtraction (running mean for variance reduction)
         baseline = sum(reward_history[-50:]) / max(len(reward_history[-50:]), 1)
-        loss = -(reward - baseline) * outputs_with_loss.loss
+        advantage = reward - baseline
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.rl.max_grad_norm)
+        loss = -advantage * outputs_with_loss.loss
+
+        # Guard: only backward if loss has grad_fn
+        if loss.requires_grad:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(trainable_params, config.rl.max_grad_norm)
+        else:
+            if step_idx == 0:
+                logger.warning(
+                    "loss.backward() skipped: no grad_fn. "
+                    "This means the forward pass doesn't flow through trainable params. "
+                    "Check that LoRA targets match model architecture."
+                )
 
         if (step_idx + 1) % config.rl.gradient_accumulation_steps == 0:
             optimizer.step()
