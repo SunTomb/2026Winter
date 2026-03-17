@@ -46,7 +46,7 @@ def compute_kendall_tau(scores_a: list[float], scores_b: list[float]) -> float:
 
 def load_model_and_tokenizer(
     model_name: str,
-    use_qlora: bool = False,
+    use_qlora: bool = True,
     load_in_4bit: bool = False,
     torch_dtype: str = "bfloat16",
 ):

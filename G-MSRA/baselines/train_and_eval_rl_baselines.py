@@ -148,6 +148,9 @@ def train_agent(agent, train_data: list[dict], num_epochs: int = 3,
         shuffled = list(train_data)
         random.shuffle(shuffled)
 
+        import torch
+        torch.cuda.empty_cache()
+        
         for ep_idx, episode in enumerate(shuffled):
             events = episode.get("events", [])
             question = episode.get("question", "")

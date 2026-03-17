@@ -1,0 +1,5 @@
+outputs/
+results/
+data/
+*.log
+*.safetensors

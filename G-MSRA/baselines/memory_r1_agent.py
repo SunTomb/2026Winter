@@ -33,19 +33,20 @@ class MemoryR1Agent(BaseAgent):
         self.memory_store = None
         self.memory_manager = None
 
-    def initialize(self, model=None, tokenizer=None):
+    def initialize(self, model=None, tokenizer=None, **kwargs):
         """Initialize using our existing MemoryStore + MemoryManager."""
-        super().initialize(model, tokenizer)
+        super().initialize(model, tokenizer, **kwargs)
 
-        from gmsra.config import GMSRAConfig
         from gmsra.memory.store import MemoryStore
         from gmsra.manager.memory_manager import MemoryManager
 
-        config = GMSRAConfig()
-        self.memory_store = MemoryStore(config)
-        self.memory_manager = MemoryManager(config)
-        self.memory_manager.model = self.model
-        self.memory_manager.tokenizer = self.tokenizer
+        self.memory_store = MemoryStore()
+        
+        self.memory_manager = MemoryManager(
+            model=self.model, 
+            tokenizer=self.tokenizer, 
+            memory_store=self.memory_store
+        )
 
     def process_event(self, event: str, context: str = "") -> dict:
         """Process event using RL-trained Memory Manager."""
@@ -55,9 +56,7 @@ class MemoryR1Agent(BaseAgent):
         operation_str, prompt = self.memory_manager.decide(event, context)
 
         # Parse and execute
-        parsed = self.memory_manager.parse_operation(operation_str)
-        op_type = parsed.get("type", "NOOP")
-        content = parsed.get("content", "")
+        op_type, target_id, content = self.memory_manager._parse_operation(operation_str, event)
 
         self._execute_crud(op_type, content, event)
 
@@ -73,7 +72,7 @@ class MemoryR1Agent(BaseAgent):
         relevant memories and generates an answer.
         """
         # Retrieve relevant memories
-        relevant = self.memory_store.retrieve(question, top_k=5)
+        relevant = self.memory_store.retrieve(question, topk=5)
         memory_context = "\n".join(
             f"- {entry.content}" for entry, score in relevant
         )
@@ -135,10 +134,10 @@ class MemoryR1Agent(BaseAgent):
     def reset(self):
         """Reset memory store for new episode."""
         if self.memory_store:
-            self.memory_store = None
-            from gmsra.config import GMSRAConfig
             from gmsra.memory.store import MemoryStore
-            self.memory_store = MemoryStore(GMSRAConfig())
+            self.memory_store = MemoryStore()
+            if hasattr(self, 'memory_manager') and self.memory_manager:
+                self.memory_manager.store = self.memory_store
 
     def get_memory_contents(self) -> list[str]:
         if self.memory_store:
@@ -147,25 +146,23 @@ class MemoryR1Agent(BaseAgent):
 
     def _execute_crud(self, op_type: str, content: str, event: str):
         """Execute CRUD operation on MemoryStore."""
-        from gmsra.memory.entry import MemoryEntry
-
         if op_type == "ADD" and content:
-            entry = MemoryEntry(
+            self.memory_store.add(
                 content=content,
                 keywords=content.split()[:5],
                 tags=["memory_r1"],
+                source=event
             )
-            self.memory_store.add(entry)
 
         elif op_type == "UPDATE" and content:
             # Find most relevant entry and update
-            results = self.memory_store.retrieve(content, top_k=1)
+            results = self.memory_store.retrieve(content, topk=1)
             if results:
                 entry, _ = results[0]
                 self.memory_store.update(entry.id, content)
 
         elif op_type == "DELETE" and content:
-            results = self.memory_store.retrieve(content, top_k=1)
+            results = self.memory_store.retrieve(content, topk=1)
             if results:
                 entry, _ = results[0]
                 self.memory_store.delete(entry.id)
