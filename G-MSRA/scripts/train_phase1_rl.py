@@ -25,15 +25,67 @@ from gmsra.utils import set_seed, load_model_and_tokenizer, compute_f1
 
 
 # ============================================================
+# TRL version detection
+# ============================================================
+
+def _get_trl_version():
+    """Get installed TRL version as a tuple of ints, e.g. (0, 15, 0)."""
+    try:
+        from importlib.metadata import version as pkg_version
+        ver_str = pkg_version("trl")
+        parts = ver_str.split(".")
+        return tuple(int(p) for p in parts[:3])
+    except Exception:
+        return (0, 0, 0)
+
+
+def _check_trl_capabilities():
+    """Check which TRL trainers are available and return capability dict."""
+    trl_version = _get_trl_version()
+    logger.info(f"TRL version detected: {'.'.join(str(v) for v in trl_version)}")
+
+    caps = {"grpo": False, "ppo": False, "version": trl_version}
+
+    # GRPOTrainer requires trl >= 0.14.0
+    if trl_version >= (0, 14, 0):
+        try:
+            from trl import GRPOConfig, GRPOTrainer
+            caps["grpo"] = True
+            logger.info("✓ GRPOTrainer available (recommended)")
+        except ImportError as e:
+            logger.warning(f"GRPOTrainer import failed despite version {trl_version}: {e}")
+
+    # PPOTrainer API differs across versions
+    try:
+        from trl import PPOConfig, PPOTrainer
+        caps["ppo"] = True
+        logger.info("✓ PPOTrainer available (fallback)")
+    except ImportError as e:
+        logger.warning(f"PPOTrainer import failed: {e}")
+
+    if not caps["grpo"] and not caps["ppo"]:
+        logger.warning(
+            "⚠ Neither GRPOTrainer nor PPOTrainer available! "
+            "Will use manual REINFORCE (slower, less stable). "
+            "To fix: pip install 'trl>=0.15.0' 'accelerate>=0.34.0' 'transformers>=4.46.0'"
+        )
+
+    return caps
+
+
+# ============================================================
 # Dataset for RL training
 # ============================================================
 
-def build_rl_prompts_from_episode(episode: dict) -> list[dict]:
+MAX_EVENTS_PER_EPISODE = 5  # Cap events per episode to avoid 1M+ total steps
+
+
+def build_rl_prompts_from_episode(episode: dict, max_events: int = MAX_EVENTS_PER_EPISODE) -> list[dict]:
     """Convert a LoCoMo episode into RL training prompts.
 
-    For each event in the episode, we create a prompt that asks the
-    Memory Manager to decide the operation. The reward comes from
-    the QA F1 at the end of the episode.
+    For each event in the episode (up to max_events), we create a prompt
+    that asks the Memory Manager to decide the operation. The reward comes
+    from the QA F1 at the end of the episode.
 
     Returns:
         List of prompt dicts with keys: "query", "events", "question", "answer"
@@ -41,6 +93,12 @@ def build_rl_prompts_from_episode(episode: dict) -> list[dict]:
     events = episode.get("events", [])
     question = episode.get("question", "")
     answer = episode.get("answer", "")
+
+    # Cap event count to avoid explosion in total training steps
+    if len(events) > max_events:
+        # Sample evenly-spaced events to maintain coverage
+        indices = [int(i * (len(events) - 1) / (max_events - 1)) for i in range(max_events)]
+        events = [events[i] for i in indices]
 
     prompts = []
     memory_context = "(empty memory)"
@@ -169,7 +227,11 @@ def main(args):
     config.rl.batch_size = args.batch_size
 
     # --- Load model ---
-    model, tokenizer = load_model_and_tokenizer(args.model_name)
+    use_qlora = not args.no_qlora
+    model, tokenizer = load_model_and_tokenizer(
+        args.model_name, use_qlora=use_qlora
+    )
+    logger.info(f"Model precision: {'bf16 (full)' if args.no_qlora else 'QLoRA 4-bit'}")
 
     if args.checkpoint and os.path.exists(args.checkpoint):
         from peft import PeftModel
@@ -185,59 +247,30 @@ def main(args):
     agent = GMSRAAgent(config)
     agent.initialize(model, tokenizer, env_type="dialogue")
 
-    # --- Setup RL training with TRL ---
-    # Strategy: try each trainer at RUNTIME (not just import).
-    # TRL's API is extremely fragmented across versions:
-    #   - GRPOTrainer: needs trl>=0.14 + PyTorch with FSDPModule
-    #   - PPOTrainer: API changed in trl 0.12 (no longer accepts model= kwarg)
-    #   - REINFORCE: always works, our reliable fallback
-    #
-    # We try GRPO → PPO → REINFORCE, catching runtime errors at each tier.
+    # --- Setup RL training with TRL (version-aware) ---
+    caps = _check_trl_capabilities()
 
-    trained = False
-
-    # --- Tier 1: GRPOTrainer (best for single-GPU, DeepSeek R1 style) ---
-    if not trained:
-        try:
-            from trl import GRPOConfig, GRPOTrainer
-            logger.info("Attempting GRPOTrainer...")
-            _train_with_grpo(model, tokenizer, dataset, agent, config, args)
-            trained = True
-        except ImportError as e:
-            logger.warning(f"GRPOTrainer import failed: {e}")
-        except TypeError as e:
-            logger.warning(f"GRPOTrainer construction failed (API mismatch): {e}")
-        except Exception as e:
-            logger.warning(f"GRPOTrainer failed at runtime: {e}")
-
-    # --- Tier 2: PPOTrainer (version-adaptive) ---
-    if not trained:
-        try:
-            logger.info("Attempting PPOTrainer...")
-            _train_with_ppo(model, tokenizer, dataset, agent, config, args)
-            trained = True
-        except ImportError as e:
-            logger.warning(f"PPOTrainer import failed: {e}")
-        except TypeError as e:
-            logger.warning(f"PPOTrainer construction failed (API mismatch): {e}")
-        except Exception as e:
-            logger.warning(f"PPOTrainer failed at runtime: {e}")
-
-    # --- Tier 3: Manual REINFORCE (always works) ---
-    if not trained:
-        logger.info("Using manual REINFORCE (no TRL dependency)")
+    if caps["grpo"]:
+        logger.info(">>> Using GRPOTrainer (preferred, most efficient)")
+        _train_with_grpo(model, tokenizer, dataset, agent, config, args)
+    elif caps["ppo"]:
+        logger.info(">>> Using PPOTrainer (fallback)")
+        _train_with_ppo(model, tokenizer, dataset, agent, config, args)
+    else:
+        logger.warning(
+            ">>> Using manual REINFORCE (last resort). "
+            "This is significantly slower. Please upgrade TRL!"
+        )
         _train_with_reinforce(model, tokenizer, dataset, agent, config, args)
 
     logger.info("Phase 1 complete!")
 
 
 def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
-    """Train using TRL's GRPOTrainer (preferred method).
-
-    Requires: trl >= 0.14, PyTorch with FSDPModule support.
-    """
+    """Train using TRL's GRPOTrainer (preferred method)."""
     from trl import GRPOConfig, GRPOTrainer
     from datasets import Dataset as HFDataset
+    import inspect
 
     # Prepare dataset in HF format
     all_prompts = []
@@ -250,6 +283,8 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
                 "question": prompt_data["question"],
                 "answer": prompt_data["answer"],
             })
+
+    logger.info(f"Prepared {len(all_prompts)} prompts for GRPO training")
 
     hf_dataset = HFDataset.from_dict({
         "prompt": all_prompts,
@@ -264,6 +299,7 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
         for i, completion in enumerate(completions):
             idx = i % len(meta_store)
             meta = meta_store[idx]
+            # Extract the actual text from completion
             if isinstance(completion, list):
                 text = completion[0] if completion else ""
             else:
@@ -279,10 +315,21 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
             rewards.append(r)
         return rewards
 
-    # GRPO config
+    # Detect whether wandb is configured
+    try:
+        import wandb
+        report_to = "wandb" if wandb.api.api_key else "none"
+    except Exception:
+        report_to = "none"
+
+    # GRPO config — scale up batch sizes to fill GPU memory
+    num_gens = args.num_generations or config.rl.batch_size
+    max_comp_len = args.max_completion_length or 256
+    per_device_bs = args.per_device_batch_size or config.rl.mini_batch_size
+
     grpo_config = GRPOConfig(
         output_dir=args.output_dir,
-        per_device_train_batch_size=config.rl.mini_batch_size,
+        per_device_train_batch_size=per_device_bs,
         gradient_accumulation_steps=config.rl.gradient_accumulation_steps,
         learning_rate=config.rl.learning_rate,
         max_grad_norm=config.rl.max_grad_norm,
@@ -290,19 +337,47 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
         logging_steps=10,
         save_steps=500,
         save_total_limit=3,
-        max_completion_length=256,
-        num_generations=config.rl.batch_size,
-        report_to="none",
+        max_completion_length=max_comp_len,
+        num_generations=num_gens,
+        report_to=report_to,
         bf16=True,
     )
-
-    trainer = GRPOTrainer(
-        model=model,
-        config=grpo_config,
-        train_dataset=hf_dataset,
-        processing_class=tokenizer,
-        reward_funcs=reward_fn,
+    logger.info(
+        f"GRPO config: per_device_bs={per_device_bs}, "
+        f"num_generations={num_gens}, max_completion_length={max_comp_len}"
     )
+
+    # GRPOTrainer constructor — handle API differences across TRL versions
+    # Some versions use `config=`, others use `args=`
+    # Some versions use `reward_funcs=`, others use `reward_func=`
+    trainer_sig = inspect.signature(GRPOTrainer.__init__)
+    trainer_params = list(trainer_sig.parameters.keys())
+
+    trainer_kwargs = {
+        "model": model,
+        "train_dataset": hf_dataset,
+    }
+
+    # config= vs args=
+    if "args" in trainer_params:
+        trainer_kwargs["args"] = grpo_config
+    else:
+        trainer_kwargs["config"] = grpo_config
+
+    # processing_class= vs tokenizer=
+    if "processing_class" in trainer_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in trainer_params:
+        trainer_kwargs["tokenizer"] = tokenizer
+
+    # reward_funcs= (list) vs reward_func= (single)
+    if "reward_funcs" in trainer_params:
+        trainer_kwargs["reward_funcs"] = [reward_fn]
+    elif "reward_func" in trainer_params:
+        trainer_kwargs["reward_func"] = reward_fn
+
+    logger.info(f"GRPOTrainer constructor args: {list(trainer_kwargs.keys())}")
+    trainer = GRPOTrainer(**trainer_kwargs)
 
     logger.info("Starting GRPO training...")
     trainer.train()
@@ -314,73 +389,61 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
 
 
 def _train_with_ppo(model, tokenizer, dataset, agent, config, args):
-    """Fallback: Train using TRL's PPOTrainer.
+    """Fallback: Train using TRL's PPOTrainer."""
+    from trl import PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
 
-    Handles multiple TRL versions:
-      - trl < 0.12: PPOTrainer(model=..., config=..., tokenizer=...)
-      - trl 0.12+:  PPOTrainer(config=PPOConfig(model_name=...))
-      - trl 0.14+:  PPOTrainer(args=PPOConfig(...), ...)
-    """
-    from trl import PPOConfig
+    # Wrap model with value head
+    ppo_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+        model if isinstance(model, str) else model
+    )
 
-    # --- Detect TRL version to pick correct API ---
-    import trl
-    trl_version = getattr(trl, "__version__", "0.0.0")
-    logger.info(f"TRL version detected: {trl_version}")
+    # PPOConfig — `model_name` was removed in trl >= 0.12
+    # Build config with only supported parameters
+    ppo_config_kwargs = {
+        "learning_rate": config.rl.learning_rate,
+        "batch_size": config.rl.batch_size,
+        "mini_batch_size": config.rl.mini_batch_size,
+        "gradient_accumulation_steps": config.rl.gradient_accumulation_steps,
+        "ppo_epochs": config.rl.ppo_epochs,
+    }
 
-    trl_major_minor = tuple(int(x) for x in trl_version.split(".")[:2])
+    # Only add model_name if PPOConfig supports it (trl < 0.12)
+    import inspect
+    ppo_config_sig = inspect.signature(PPOConfig.__init__)
+    if "model_name" in ppo_config_sig.parameters:
+        ppo_config_kwargs["model_name"] = args.model_name
 
-    # Try old-style PPOTrainer first (trl < 0.12)
-    if trl_major_minor < (0, 12):
-        from trl import PPOTrainer, AutoModelForCausalLMWithValueHead
-        logger.info("Using PPOTrainer (trl < 0.12 API: model= kwarg)")
+    # Only add log_with if supported
+    if "log_with" in ppo_config_sig.parameters:
+        try:
+            import wandb
+            ppo_config_kwargs["log_with"] = "wandb" if wandb.api.api_key else None
+        except Exception:
+            pass
 
-        ppo_model = AutoModelForCausalLMWithValueHead.from_pretrained(model)
+    ppo_config = PPOConfig(**ppo_config_kwargs)
 
-        ppo_config = PPOConfig(
-            learning_rate=config.rl.learning_rate,
-            batch_size=config.rl.batch_size,
-            mini_batch_size=config.rl.mini_batch_size,
-            gradient_accumulation_steps=config.rl.gradient_accumulation_steps,
-        )
+    # PPOTrainer constructor — handle API differences
+    ppo_trainer_sig = inspect.signature(PPOTrainer.__init__)
+    ppo_trainer_kwargs = {
+        "model": ppo_model,
+        "config": ppo_config,
+    }
+    if "tokenizer" in ppo_trainer_sig.parameters:
+        ppo_trainer_kwargs["tokenizer"] = tokenizer
+    elif "processing_class" in ppo_trainer_sig.parameters:
+        ppo_trainer_kwargs["processing_class"] = tokenizer
 
-        ppo_trainer = PPOTrainer(
-            model=ppo_model,
-            config=ppo_config,
-            tokenizer=tokenizer,
-        )
-    else:
-        # trl >= 0.12: PPOTrainer internally loads the model
-        # We must pass model_name string, not a pre-loaded model object
-        from trl import PPOTrainer
+    ppo_trainer = PPOTrainer(**ppo_trainer_kwargs)
 
-        logger.info("Using PPOTrainer (trl >= 0.12 API: internal model init)")
-
-        # Build config with model_name for internal loading
-        model_name = args.model_name
-
-        ppo_config = PPOConfig(
-            model_name=model_name,
-            learning_rate=config.rl.learning_rate,
-            batch_size=config.rl.batch_size,
-            mini_batch_size=config.rl.mini_batch_size,
-            gradient_accumulation_steps=config.rl.gradient_accumulation_steps,
-        )
-
-        # trl 0.12+ handles model loading internally
-        ppo_trainer = PPOTrainer(config=ppo_config)
-
-    # --- Training loop (same for all versions) ---
+    # Training loop
     best_reward = -float("inf")
     all_prompts = []
     for episode in dataset[:config.rl.num_episodes]:
         all_prompts.extend(build_rl_prompts_from_episode(episode))
 
-    # Determine device
-    try:
-        device = ppo_trainer.model.pretrained_model.device
-    except AttributeError:
-        device = next(ppo_trainer.model.parameters()).device
+    total_batches = (len(all_prompts) + config.rl.batch_size - 1) // config.rl.batch_size
+    logger.info(f"PPO training: {len(all_prompts)} prompts, {total_batches} batches")
 
     for batch_start in range(0, len(all_prompts), config.rl.batch_size):
         batch = all_prompts[batch_start:batch_start + config.rl.batch_size]
@@ -398,7 +461,7 @@ def _train_with_ppo(model, tokenizer, dataset, agent, config, args):
         response_tensors = []
         for qt in query_tensors:
             response = ppo_trainer.generate(
-                qt.unsqueeze(0).to(device),
+                qt.unsqueeze(0).to(ppo_model.pretrained_model.device),
                 max_new_tokens=256,
                 do_sample=True,
                 temperature=0.7,
@@ -426,21 +489,26 @@ def _train_with_ppo(model, tokenizer, dataset, agent, config, args):
 
         if step_num % 10 == 0:
             logger.info(
-                f"PPO Step {step_num} | "
+                f"PPO Step {step_num}/{total_batches} | "
                 f"avg_reward={avg_reward:.3f} | "
                 f"kl={stats.get('objective/kl', 0):.4f}"
             )
 
         if avg_reward > best_reward:
             best_reward = avg_reward
-            os.makedirs(os.path.join(args.output_dir, "best"), exist_ok=True)
             ppo_trainer.save_pretrained(os.path.join(args.output_dir, "best"))
 
     logger.info(f"PPO training complete. Best reward={best_reward:.4f}")
 
 
 def _train_with_reinforce(model, tokenizer, dataset, agent, config, args):
-    """Manual REINFORCE fallback when TRL is not available."""
+    """Manual REINFORCE fallback when TRL trainers are not available.
+
+    This is a last-resort fallback. It uses mini-batched REINFORCE with
+    an exponential moving average baseline to avoid zero gradients.
+
+    For best performance, please upgrade TRL: pip install 'trl>=0.15.0'
+    """
     from peft import LoraConfig, get_peft_model, TaskType
 
     # Setup LoRA if not already
@@ -453,34 +521,8 @@ def _train_with_reinforce(model, tokenizer, dataset, agent, config, args):
         )
         model = get_peft_model(model, lora_config)
 
-    # CRITICAL: PeftModel.from_pretrained() loads LoRA weights with
-    # requires_grad=False. We must re-enable gradients explicitly.
-    for name, param in model.named_parameters():
-        if any(k in name.lower() for k in ["lora", "adapter", "modules_to_save"]):
-            param.requires_grad = True
-
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    trainable_count = sum(p.numel() for p in trainable_params)
-    total_count = sum(p.numel() for p in model.parameters())
-    logger.info(
-        f"REINFORCE: {trainable_count:,} trainable / {total_count:,} total params "
-        f"({100*trainable_count/max(total_count,1):.2f}%)"
-    )
-
-    if trainable_count == 0:
-        logger.error("No trainable parameters found! Cannot train.")
-        logger.info("Attempting to make lm_head trainable as fallback...")
-        for name, param in model.named_parameters():
-            if "lm_head" in name or "embed" in name:
-                param.requires_grad = True
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        trainable_count = sum(p.numel() for p in trainable_params)
-        if trainable_count == 0:
-            raise RuntimeError("Still no trainable params after fallback. Check model loading.")
-
-    # Only pass trainable params to optimizer (avoids errors with frozen/quantized params)
     optimizer = torch.optim.AdamW(
-        trainable_params, lr=config.rl.learning_rate
+        model.parameters(), lr=config.rl.learning_rate
     )
 
     best_avg_reward = -float("inf")
@@ -490,77 +532,115 @@ def _train_with_reinforce(model, tokenizer, dataset, agent, config, args):
     for episode in dataset[:config.rl.num_episodes]:
         all_prompts.extend(build_rl_prompts_from_episode(episode))
 
+    total_steps = len(all_prompts)
+    batch_size = config.rl.mini_batch_size  # Use mini-batch instead of serial
+    total_batches = (total_steps + batch_size - 1) // batch_size
+
+    logger.info(
+        f"REINFORCE training: {total_steps} prompts, "
+        f"batch_size={batch_size}, {total_batches} batches"
+    )
+
+    # Exponential moving average baseline (avoids zero-gradient trap)
+    ema_baseline = 0.0
+    ema_alpha = 0.05  # Smoothing factor
+    baseline_warmup = 20  # Don't subtract baseline during warmup
+
     model.train()
-    for step_idx, item in enumerate(all_prompts):
-        query = item["query"]
+    optimizer.zero_grad()
 
-        # Forward pass: generate response (no grad needed for sampling)
-        inputs = tokenizer(
-            query, return_tensors="pt", truncation=True, max_length=1024
-        )
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    global_step = 0
+    for batch_idx in range(0, total_steps, batch_size):
+        batch_items = all_prompts[batch_idx:batch_idx + batch_size]
+        batch_loss = 0.0
+        batch_rewards = []
 
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs, max_new_tokens=256,
-                do_sample=True, temperature=0.7,
-                pad_token_id=tokenizer.pad_token_id,
+        for item in batch_items:
+            query = item["query"]
+
+            # Forward pass: generate response
+            inputs = tokenizer(
+                query, return_tensors="pt", truncation=True, max_length=1024
             )
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        response_ids = outputs[0][inputs["input_ids"].shape[1]:]
-        response_text = tokenizer.decode(response_ids, skip_special_tokens=True)
-
-        # Compute reward
-        reward = compute_rl_reward(
-            response=response_text,
-            event=item["event"],
-            question=item["question"],
-            answer=item["answer"],
-            agent=agent,
-        )
-        reward_history.append(reward)
-
-        # REINFORCE: -(R - baseline) * log p(response | query)
-        # Re-run forward pass WITH gradients to get log-prob loss
-        full_ids = outputs[0].unsqueeze(0).to(model.device)
-        labels = full_ids.clone()
-        labels[0, :inputs["input_ids"].shape[1]] = -100  # Mask prompt
-
-        outputs_with_loss = model(full_ids, labels=labels)
-
-        # Baseline subtraction (running mean for variance reduction)
-        baseline = sum(reward_history[-50:]) / max(len(reward_history[-50:]), 1)
-        advantage = reward - baseline
-
-        loss = -advantage * outputs_with_loss.loss
-
-        # Guard: only backward if loss has grad_fn
-        if loss.requires_grad:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable_params, config.rl.max_grad_norm)
-        else:
-            if step_idx == 0:
-                logger.warning(
-                    "loss.backward() skipped: no grad_fn. "
-                    "This means the forward pass doesn't flow through trainable params. "
-                    "Check that LoRA targets match model architecture."
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs, max_new_tokens=128,  # Shorter for speed
+                    do_sample=True, temperature=0.7,
+                    pad_token_id=tokenizer.pad_token_id,
                 )
 
-        if (step_idx + 1) % config.rl.gradient_accumulation_steps == 0:
+            response_ids = outputs[0][inputs["input_ids"].shape[1]:]
+            response_text = tokenizer.decode(response_ids, skip_special_tokens=True)
+
+            # Compute reward
+            reward = compute_rl_reward(
+                response=response_text,
+                event=item["event"],
+                question=item["question"],
+                answer=item["answer"],
+                agent=agent,
+            )
+            reward_history.append(reward)
+            batch_rewards.append(reward)
+
+            # REINFORCE loss: -advantage * log p(response | query)
+            full_ids = outputs[0].unsqueeze(0)
+            labels = full_ids.clone()
+            labels[0, :inputs["input_ids"].shape[1]] = -100  # Mask prompt
+
+            outputs_with_loss = model(full_ids, labels=labels)
+
+            # Advantage = reward - baseline
+            advantage = reward - ema_baseline
+            # During warmup, use raw reward as advantage
+            if global_step < baseline_warmup:
+                advantage = reward
+
+            # Prevent zero gradients: clamp minimum absolute advantage
+            if abs(advantage) < 0.01:
+                advantage = 0.01 if advantage >= 0 else -0.01
+
+            # Accumulate loss (negative because we want to maximize reward)
+            sample_loss = -advantage * outputs_with_loss.loss
+            batch_loss += sample_loss / len(batch_items)  # Average over batch
+
+            global_step += 1
+
+        # Backward pass on accumulated batch loss
+        if isinstance(batch_loss, torch.Tensor):
+            batch_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.rl.max_grad_norm)
+
+        batch_num = batch_idx // batch_size + 1
+
+        # Gradient accumulation
+        if batch_num % config.rl.gradient_accumulation_steps == 0:
             optimizer.step()
             optimizer.zero_grad()
 
-        if (step_idx + 1) % 50 == 0:
-            recent_avg = sum(reward_history[-50:]) / len(reward_history[-50:])
+        # Update EMA baseline with batch average
+        batch_avg_reward = sum(batch_rewards) / len(batch_rewards)
+        ema_baseline = ema_alpha * batch_avg_reward + (1 - ema_alpha) * ema_baseline
+
+        if batch_num % 20 == 0:
+            recent_avg = sum(reward_history[-100:]) / len(reward_history[-100:])
             logger.info(
-                f"REINFORCE Step {step_idx+1}/{len(all_prompts)} | "
-                f"reward={reward:.3f} | avg_50={recent_avg:.3f}"
+                f"REINFORCE Batch {batch_num}/{total_batches} | "
+                f"batch_reward={batch_avg_reward:.3f} | "
+                f"avg_100={recent_avg:.3f} | "
+                f"baseline={ema_baseline:.3f}"
             )
             if recent_avg > best_avg_reward:
                 best_avg_reward = recent_avg
                 os.makedirs(args.output_dir, exist_ok=True)
                 model.save_pretrained(os.path.join(args.output_dir, "best"))
                 tokenizer.save_pretrained(os.path.join(args.output_dir, "best"))
+
+    # Final optimizer step for any remaining gradients
+    optimizer.step()
+    optimizer.zero_grad()
 
     # Save final
     os.makedirs(args.output_dir, exist_ok=True)
@@ -688,5 +768,20 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=1.41e-5)
     parser.add_argument("--num_gpus", type=int, default=4)
+
+    # --- Performance tuning flags ---
+    parser.add_argument("--no_qlora", action="store_true",
+                        help="Use bf16 full-precision + LoRA instead of QLoRA 4-bit. "
+                             "Uses ~14GB for 7B model (vs ~5GB) but eliminates "
+                             "dequantize overhead → faster training.")
+    parser.add_argument("--per_device_batch_size", type=int, default=None,
+                        help="Override per-device train batch size (default: mini_batch_size from config)")
+    parser.add_argument("--num_generations", type=int, default=None,
+                        help="Number of generations per prompt for GRPO (default: batch_size). "
+                             "Increasing this uses more VRAM but gives better advantage estimates.")
+    parser.add_argument("--max_completion_length", type=int, default=None,
+                        help="Max tokens per generated completion (default: 256). "
+                             "Memory operations are short, so 128-192 is usually enough.")
+
     args = parser.parse_args()
     main(args)

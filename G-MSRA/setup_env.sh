@@ -32,6 +32,10 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 echo "[3/4] Installing project dependencies"
 pip install -r requirements.txt
 
+# --- Step 3.5: Ensure compatible TRL/accelerate/transformers versions ---
+echo "[3.5/4] Ensuring TRL == 0.15.2 with compatible accelerate/transformers"
+pip install "trl==0.15.2" "accelerate>=0.34.0,<1.0" "transformers>=4.46.0,<4.50.0" --upgrade
+
 # --- Step 4: Install G-MSRA as editable package ---
 echo "[4/4] Installing G-MSRA in development mode"
 pip install -e .
@@ -49,10 +53,18 @@ if torch.cuda.is_available():
     print(f'  GPU count: {torch.cuda.device_count()}')
     for i in range(torch.cuda.device_count()):
         print(f'    GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_mem / 1e9:.1f} GB)')
-import transformers, peft, trl
+import transformers, peft, trl, accelerate
 print(f'  Transformers: {transformers.__version__}')
+print(f'  Accelerate: {accelerate.__version__}')
 print(f'  PEFT: {peft.__version__}')
 print(f'  TRL: {trl.__version__}')
+# Verify GRPOTrainer is available
+try:
+    from trl import GRPOConfig, GRPOTrainer
+    print('  ✓ GRPOTrainer available')
+except ImportError as e:
+    print(f'  ✗ GRPOTrainer NOT available: {e}')
+    print('    Fix: pip install trl>=0.15.0')
 print('  ✓ All dependencies verified!')
 "
 
