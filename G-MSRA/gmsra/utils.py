@@ -49,8 +49,19 @@ def load_model_and_tokenizer(
     use_qlora: bool = True,
     load_in_4bit: bool = False,
     torch_dtype: str = "bfloat16",
+    use_accelerate: bool = False,
 ):
-    """Load a causal LM model and tokenizer with optional QLoRA."""
+    """Load a causal LM model and tokenizer with optional QLoRA.
+
+    Args:
+        model_name: HuggingFace model name or local path.
+        use_qlora: Whether to use QLoRA 4-bit quantization.
+        load_in_4bit: Whether to load in 4-bit (alias for use_qlora).
+        torch_dtype: Torch dtype string ("bfloat16", "float16", "float32").
+        use_accelerate: If True, skip device_map so that accelerate/DDP
+            can handle device placement. Required for multi-GPU training
+            via `accelerate launch`.
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
     dtype_map = {
@@ -76,11 +87,14 @@ def load_model_and_tokenizer(
             bnb_4bit_use_double_quant=True,
         )
         kwargs["quantization_config"] = bnb_config
-    else:
+    elif not use_accelerate:
+        # Only set device_map="auto" for single-GPU / non-DDP usage.
+        # When using accelerate launch (multi-GPU DDP), accelerate handles
+        # device placement and device_map="auto" would conflict.
         kwargs["device_map"] = "auto"
 
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
-    logger.info(f"Loaded model: {model_name} (QLoRA={use_qlora})")
+    logger.info(f"Loaded model: {model_name} (QLoRA={use_qlora}, accelerate={use_accelerate})")
 
     return model, tokenizer
 

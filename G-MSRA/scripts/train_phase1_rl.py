@@ -7,9 +7,20 @@ Uses TRL's GRPOTrainer (Group Relative Policy Optimization) for RL training.
 GRPO is simpler and more stable than PPO for language model RL,
 and doesn't require a separate value head or critic model.
 
-Usage:
-    accelerate launch --num_processes 4 scripts/train_phase1_rl.py \
-        --model_name Qwen/Qwen2.5-7B-Instruct --num_episodes 5000
+Usage (single A100 80GB):
+    CUDA_VISIBLE_DEVICES=<GPU> python scripts/train_phase1_rl.py \
+        --model_name Qwen/Qwen2.5-7B-Instruct \
+        --num_episodes 5000 --no_qlora \
+        --per_device_batch_size 8 --num_generations 16 \
+        --max_completion_length 192 --output_dir outputs/phase1
+
+Usage (4× A40 48GB, multi-GPU):
+    CUDA_VISIBLE_DEVICES=1,5,6,7 accelerate launch \
+        --config_file cluster/accelerate_a40.yaml \
+        scripts/train_phase1_rl.py \
+        --model_name Qwen/Qwen2.5-7B-Instruct \
+        --num_episodes 5000 --gpu_preset a40 \
+        --output_dir outputs/phase1
 """
 
 import argparse
@@ -217,21 +228,81 @@ def compute_rl_reward(
 # Main training loop
 # ============================================================
 
+# ============================================================
+# GPU preset configurations
+# ============================================================
+
+GPU_PRESETS = {
+    "a100": {
+        "per_device_batch_size": 8,
+        "num_generations": 16,
+        "max_completion_length": 192,
+        "gradient_accumulation_steps": 2,
+        "description": "Single A100 80GB — large batches, high VRAM (~65-70GB)",
+    },
+    "a40": {
+        "per_device_batch_size": 4,
+        "num_generations": 8,
+        "max_completion_length": 192,
+        "gradient_accumulation_steps": 4,
+        "description": "Multi-GPU A40 48GB — reduced per-device sizes, use with accelerate launch",
+    },
+}
+
+
+def _apply_gpu_preset(args):
+    """Apply GPU preset defaults for any CLI args not explicitly set."""
+    if args.gpu_preset and args.gpu_preset in GPU_PRESETS:
+        preset = GPU_PRESETS[args.gpu_preset]
+        logger.info(f"Applying GPU preset '{args.gpu_preset}': {preset['description']}")
+        if args.per_device_batch_size is None:
+            args.per_device_batch_size = preset["per_device_batch_size"]
+        if args.num_generations is None:
+            args.num_generations = preset["num_generations"]
+        if args.max_completion_length is None:
+            args.max_completion_length = preset["max_completion_length"]
+        if args.gradient_accumulation_steps is None:
+            args.gradient_accumulation_steps = preset["gradient_accumulation_steps"]
+    return args
+
+
+def _detect_multi_gpu():
+    """Detect if we are running under accelerate multi-GPU."""
+    # accelerate sets WORLD_SIZE > 1 for multi-GPU launches
+    import os
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    is_multi = world_size > 1 or local_rank >= 0
+    if is_multi:
+        logger.info(f"Multi-GPU detected: WORLD_SIZE={world_size}, LOCAL_RANK={local_rank}")
+    return is_multi
+
+
 def main(args):
     set_seed(42)
     logger.info(f"Phase 1: RL + External Reward | model={args.model_name}")
+
+    # --- Apply GPU preset (fills in unset CLI args with preset defaults) ---
+    args = _apply_gpu_preset(args)
 
     config = GMSRAConfig()
     config.rl.num_episodes = args.num_episodes
     config.rl.learning_rate = args.learning_rate
     config.rl.batch_size = args.batch_size
+    if args.gradient_accumulation_steps is not None:
+        config.rl.gradient_accumulation_steps = args.gradient_accumulation_steps
+
+    # --- Detect multi-GPU (accelerate launch) ---
+    is_multi_gpu = _detect_multi_gpu()
 
     # --- Load model ---
     use_qlora = not args.no_qlora
     model, tokenizer = load_model_and_tokenizer(
-        args.model_name, use_qlora=use_qlora
+        args.model_name, use_qlora=use_qlora, use_accelerate=is_multi_gpu
     )
     logger.info(f"Model precision: {'bf16 (full)' if args.no_qlora else 'QLoRA 4-bit'}")
+    if is_multi_gpu:
+        logger.info("Model loaded without device_map (accelerate handles placement)")
 
     if args.checkpoint and os.path.exists(args.checkpoint):
         from peft import PeftModel
@@ -326,11 +397,12 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
     num_gens = args.num_generations or config.rl.batch_size
     max_comp_len = args.max_completion_length or 256
     per_device_bs = args.per_device_batch_size or config.rl.mini_batch_size
+    grad_accum = args.gradient_accumulation_steps or config.rl.gradient_accumulation_steps
 
-    grpo_config = GRPOConfig(
+    grpo_kwargs = dict(
         output_dir=args.output_dir,
         per_device_train_batch_size=per_device_bs,
-        gradient_accumulation_steps=config.rl.gradient_accumulation_steps,
+        gradient_accumulation_steps=grad_accum,
         learning_rate=config.rl.learning_rate,
         max_grad_norm=config.rl.max_grad_norm,
         num_train_epochs=1,
@@ -342,9 +414,17 @@ def _train_with_grpo(model, tokenizer, dataset, agent, config, args):
         report_to=report_to,
         bf16=True,
     )
+
+    # Optional DeepSpeed config
+    if args.deepspeed and os.path.exists(args.deepspeed):
+        grpo_kwargs["deepspeed"] = args.deepspeed
+        logger.info(f"DeepSpeed config: {args.deepspeed}")
+
+    grpo_config = GRPOConfig(**grpo_kwargs)
     logger.info(
         f"GRPO config: per_device_bs={per_device_bs}, "
-        f"num_generations={num_gens}, max_completion_length={max_comp_len}"
+        f"num_generations={num_gens}, max_completion_length={max_comp_len}, "
+        f"gradient_accumulation_steps={grad_accum}"
     )
 
     # GRPOTrainer constructor — handle API differences across TRL versions
@@ -769,6 +849,14 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=1.41e-5)
     parser.add_argument("--num_gpus", type=int, default=4)
 
+    # --- GPU preset ---
+    parser.add_argument("--gpu_preset", type=str, default=None,
+                        choices=list(GPU_PRESETS.keys()),
+                        help="GPU preset for quick configuration. "
+                             "'a100': single A100 80GB (per_device_bs=8, num_gens=16). "
+                             "'a40': multi-GPU A40 48GB (per_device_bs=4, num_gens=8, grad_accum=4). "
+                             "Preset values are overridden by explicit CLI args.")
+
     # --- Performance tuning flags ---
     parser.add_argument("--no_qlora", action="store_true",
                         help="Use bf16 full-precision + LoRA instead of QLoRA 4-bit. "
@@ -782,6 +870,12 @@ if __name__ == "__main__":
     parser.add_argument("--max_completion_length", type=int, default=None,
                         help="Max tokens per generated completion (default: 256). "
                              "Memory operations are short, so 128-192 is usually enough.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=None,
+                        help="Gradient accumulation steps. Increase to compensate for "
+                             "smaller per-device batch sizes on limited-VRAM GPUs.")
+    parser.add_argument("--deepspeed", type=str, default=None,
+                        help="Path to DeepSpeed config JSON (e.g. cluster/ds_zero2_a40.json). "
+                             "Enables ZeRO optimizer partitioning for additional memory savings.")
 
     args = parser.parse_args()
     main(args)
