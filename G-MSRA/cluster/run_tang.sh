@@ -39,8 +39,14 @@ case ${PHASE} in
         # 4× A40 (48GB each), bf16 full precision, data-parallel
         # --gpu_preset a40 auto-configures: per_device_bs=4, num_gens=8,
         #   max_completion_length=192, gradient_accumulation_steps=4
+        if [ "${NUM_GPUS}" -eq 2 ]; then
+            ACCEL_CONFIG="cluster/accelerate_a40_2gpu.yaml"
+        else
+            ACCEL_CONFIG="cluster/accelerate_a40.yaml"
+        fi
+        
         accelerate launch \
-            --config_file cluster/accelerate_a40.yaml \
+            --config_file ${ACCEL_CONFIG} \
             --num_processes ${NUM_GPUS} \
             scripts/train_phase1_rl.py \
             --model_name ${MODEL_NAME} \
@@ -51,8 +57,14 @@ case ${PHASE} in
         ;;
     "phase1_ds")
         # A40 Phase 1 with DeepSpeed ZeRO-2 for extra memory savings
+        if [ "${NUM_GPUS}" -eq 2 ]; then
+            ACCEL_CONFIG="cluster/accelerate_a40_2gpu.yaml"
+        else
+            ACCEL_CONFIG="cluster/accelerate_a40.yaml"
+        fi
+        
         accelerate launch \
-            --config_file cluster/accelerate_a40.yaml \
+            --config_file ${ACCEL_CONFIG} \
             --num_processes ${NUM_GPUS} \
             scripts/train_phase1_rl.py \
             --model_name ${MODEL_NAME} \
